@@ -1,0 +1,67 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  body {
+    @apply bg-gradient-to-br from-slate-900 via-purple-900 to-slate-900 min-h-screen;
+  }
+}
+
+@layer components {
+  .card {
+    @apply bg-white rounded-xl shadow-lg p-6;
+  }
+  
+  .btn {
+    @apply px-4 py-2 rounded-lg font-semibold transition-all duration-200;
+  }
+  
+  .btn-primary {
+    @apply bg-primary-600 text-white hover:bg-primary-700 hover:shadow-lg hover:-translate-y-0.5;
+  }
+  
+  .btn-danger {
+    @apply bg-red-600 text-white hover:bg-red-700 hover:shadow-lg;
+  }
+  
+  .btn-secondary {
+    @apply bg-gray-600 text-white hover:bg-gray-700;
+  }
+  
+  .badge {
+    @apply px-3 py-1 rounded-full text-sm font-semibold;
+  }
+  
+  .badge-active {
+    @apply bg-green-100 text-green-800;
+  }
+  
+  .badge-inactive {
+    @apply bg-gray-100 text-gray-600;
+  }
+  
+  .badge-error {
+    @apply bg-red-100 text-red-800;
+  }
+}
+
+/* Custom scrollbar */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: rgba(0, 0, 0, 0.1);
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(0, 0, 0, 0.3);
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(0, 0, 0, 0.5);
+}

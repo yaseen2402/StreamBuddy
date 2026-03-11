@@ -1,0 +1,59 @@
+apiVersion: serving.knative.dev/v1
+kind: Service
+metadata:
+  name: streambuddy
+  labels:
+    cloud.googleapis.com/location: us-central1
+  annotations:
+    run.googleapis.com/ingress: all
+    run.googleapis.com/ingress-status: all
+spec:
+  template:
+    metadata:
+      annotations:
+        # Disable CPU throttling for real-time processing
+        run.googleapis.com/cpu-throttling: 'false'
+        # Set container concurrency to 1 (one streaming session per container)
+        autoscaling.knative.dev/maxScale: '10'
+        autoscaling.knative.dev/minScale: '1'
+    spec:
+      # Single session per container for isolated streaming
+      containerConcurrency: 1
+      # Extended timeout for long streaming sessions (1 hour)
+      timeoutSeconds: 3600
+      containers:
+      - name: streambuddy
+        # Image will be set during deployment
+        image: gcr.io/PROJECT_ID/streambuddy:latest
+        ports:
+        - name: http1
+          containerPort: 8080
+        env:
+        - name: GCP_PROJECT_ID
+          value: PROJECT_ID
+        - name: PYTHONUNBUFFERED
+          value: '1'
+        resources:
+          limits:
+            # 2 vCPU for real-time processing
+            cpu: '2'
+            # 4 GB memory for video/audio buffering
+            memory: 4Gi
+        # Liveness probe - checks if container is alive
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8080
+          initialDelaySeconds: 10
+          periodSeconds: 30
+          timeoutSeconds: 3
+          failureThreshold: 3
+        # Readiness probe - checks if container is ready to serve
+        startupProbe:
+          httpGet:
+            path: /ready
+            port: 8080
+          initialDelaySeconds: 5
+          periodSeconds: 10
+          timeoutSeconds: 3
+          failureThreshold: 3

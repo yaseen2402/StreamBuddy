@@ -1,0 +1,33 @@
+# Google Cloud Platform Services
+google-cloud-logging==3.11.3
+google-cloud-monitoring==2.23.1
+google-cloud-secret-manager==2.21.1
+
+# Testing Frameworks
+pytest==8.3.4
+hypothesis==6.122.3
+
+# Stream Processing
+google-api-python-client==2.156.0  # YouTube API client
+opencv-python==4.10.0.84
+Pillow==10.4.0  # Image processing for video/screen capture
+mss==9.0.1  # Screen capture for local testing
+
+# Google Agent Development Kit (ADK)
+google-genai==1.65.0
+
+# Additional dependencies for streaming and async operations
+aiohttp==3.11.11
+websockets==14.1
+
+# Environment and configuration
+python-dotenv==1.0.1
+
+# Audio processing
+pyaudio==0.2.14
+
+# Web UI dependencies
+fastapi==0.115.6
+uvicorn==0.34.0
+jinja2==3.1.5
+python-multipart==0.0.20
