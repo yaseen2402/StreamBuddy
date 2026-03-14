@@ -12,6 +12,7 @@ import asyncio
 import logging
 import os
 import time
+import json
 from datetime import datetime
 from typing import Optional, Dict, Any
 from pathlib import Path
@@ -79,6 +80,8 @@ class ADKStreamBuddySession:
         self.client: Optional[genai.Client] = None
         self.live_session = None  # Live streaming session
         self.audio_output = None  # Audio output service
+        # Perception / captioning client (non-Live)
+        self.caption_client: Optional[genai.Client] = None
         
         # Capture components
         self.screen_capture: Optional[ScreenCapture] = None
@@ -104,6 +107,31 @@ class ADKStreamBuddySession:
             "audio_chunks_captured": 0,
             "responses_generated": 0
         }
+        
+        # Captioning / perception settings
+        self.last_caption_time: float = 0.0
+        # Take a screenshot less frequently for perception (free-tier friendly)
+        # 30 seconds → at most ~2 caption calls per minute.
+        self.caption_interval_sec: float = 30.0
+        
+        # Text timeline of what has been happening on screen
+        # Each entry: {"timestamp": float, "summary": str}
+        self.screen_timeline: list[Dict[str, Any]] = []
+        
+        # Conversation / voice timeline (what we've asked the voice model to do)
+        # Each entry: {"timestamp": float, "text": str}
+        self.conversation_timeline: list[Dict[str, Any]] = []
+        
+        # Voice triggering controls
+        self.last_voice_time: float = 0.0
+        # Minimum spacing between voice triggers (seconds).
+        # 45 seconds → at most ~1–2 decision calls per minute.
+        self.min_voice_interval_sec: float = 45.0
+        
+        # Persistent session logging (captions + conversation) on disk
+        self.session_log_dir: Optional[Path] = None
+        self.caption_log_path: Optional[Path] = None
+        self.conversation_log_path: Optional[Path] = None
     
     async def start(self, config: StartSessionRequest) -> Dict[str, Any]:
         """Start ADK streaming session"""
@@ -119,6 +147,18 @@ class ADKStreamBuddySession:
         self.session_id = f"adk_session_{int(datetime.now().timestamp())}"
         self.start_time = datetime.now()
         
+        # Create a directory for this session's persistent logs
+        try:
+            base_log_dir = Path("streambuddy_sessions")
+            base_log_dir.mkdir(parents=True, exist_ok=True)
+            self.session_log_dir = base_log_dir / self.session_id
+            self.session_log_dir.mkdir(parents=True, exist_ok=True)
+            self.caption_log_path = self.session_log_dir / "captions.jsonl"
+            self.conversation_log_path = self.session_log_dir / "conversation.jsonl"
+            logger.info(f"Session logs will be stored in {self.session_log_dir}")
+        except Exception as e:
+            logger.error(f"Failed to initialize session log directory: {e}", exc_info=True)
+        
         # Get API key
         api_key = os.getenv("GOOGLE_API_KEY")
         if not api_key:
@@ -126,10 +166,18 @@ class ADKStreamBuddySession:
         
         logger.info(f"API key loaded: {api_key[:10]}...")
         
-        # Initialize ADK client
-        self.client = genai.Client(api_key=api_key)
-        logger.info("✓ ADK Client created")
+        # Initialize ADK client with v1alpha API version
+        # v1alpha is required for proactive audio and affective dialog features
+        self.client = genai.Client(
+            api_key=api_key,
+            http_options={'api_version': 'v1alpha'}
+        )
+        logger.info("✓ ADK Client created (v1alpha API)")
         await self.broadcast_status("Client initialized")
+        
+        # Separate client for perception/captioning (standard Gemini API)
+        # Uses default API version for gemini-2.5-flash.
+        self.caption_client = genai.Client(api_key=api_key)
         
         # Initialize audio output
         from streambuddy_agent.audio_output import AudioOutputService, MixerConfig, QueueConfig
@@ -223,6 +271,12 @@ class ADKStreamBuddySession:
         # Start ADK streaming task
         self.stream_task = asyncio.create_task(self._run_adk_stream())
         
+        # Start proactive commentary loop in background
+        # This periodically nudges the model to react to recent context,
+        # so the agent doesn't go silent after the first response.
+        if self.commentary_task is None or self.commentary_task.done():
+            self.commentary_task = asyncio.create_task(self._proactive_commentary_loop())
+        
         logger.info("✓ ADK streaming started")
         await self.broadcast_status("StreamBuddy is now active!", "success")
         
@@ -239,32 +293,30 @@ class ADKStreamBuddySession:
             logger.info("Starting Live API stream")
             
             # System instruction for StreamBuddy personality
-            system_instruction = """You are StreamBuddy, a casual and friendly AI co-host for live streaming.
+            # Following Google's best practices: https://docs.cloud.google.com/vertex-ai/generative-ai/docs/live-api/best-practices
+            # Structure: Persona → Conversational Rules → Guardrails
+            # With Proactive Audio enabled, the model can initiate responses based on context
+            system_instruction = """**Persona:**
+You are StreamBuddy, a casual and friendly AI co-host for live streaming. You speak naturally and conversationally, like a real person hanging out with friends.
 
-Your Role:
-- Be a supportive companion who makes streaming more fun
-- You receive VIDEO FRAMES (images) and AUDIO from the stream - analyze both!
-- Make casual observations about what you SEE on screen in the video
-- React naturally to interesting or exciting visual moments
-- Comment on what's happening in the game, app, or content being shown
-- Keep the vibe relaxed and conversational
+**Conversational Rules:**
 
-Personality:
-- Talk like a real person, not a robot
-- Be genuinely interested and engaged with what you're seeing
-- Use natural reactions: "Whoa!", "Nice!", "That's cool!", "I see..."
-- It's okay to be quiet sometimes - quality over quantity
+1. **Observe the stream:**  Watch and listen to what's happening.
 
-Guidelines:
-- Keep responses SHORT (5-15 seconds)
-- LOOK AT THE VIDEO - describe what you see on screen
-- Don't narrate everything - just react to interesting visual stuff
-- Be spontaneous and authentic
-- Make the stream more enjoyable for viewers
+2. **React proactively:** When you see or hear something interesting, funny, exciting, or notable happening on screen or in the audio, speak up! Don't wait to be asked - that's what makes you a great co-host.
 
-Remember: You're watching the screen through video frames. Comment on what you actually see!"""
+3. **Know when to stay quiet:** Not everything needs commentary. Stay silent during:
+   - Routine/repetitive actions
+   - Quiet moments where the streamer is concentrating
+   - When nothing particularly interesting is happening
+   - Background noise or irrelevant audio
+
+4. **Be spontaneous but accurate:** Use natural reactions and talk like you're genuinely watching with the streamer. Don't narrate everything - avoid making up details that you can't clearly observe.
+"""
             
-            # Configure streaming
+            # Configure streaming with proactive audio
+            # Proactive Audio allows the model to respond without direct prompts
+            # and ignore irrelevant input (e.g., background noise)
             config = types.LiveConnectConfig(
                 response_modalities=["AUDIO"],
                 system_instruction=system_instruction,
@@ -276,6 +328,14 @@ Remember: You're watching the screen through video frames. Comment on what you a
                     )
                 )
             )
+            
+            # Enable proactive audio (requires v1alpha API version)
+            # Proactive audio allows the model to initiate responses
+            # based on context without explicit user prompts
+            config.proactivity = types.ProactivityConfig(
+                proactive_audio=True
+            )
+            logger.info("Proactive audio enabled")
             
             # Start bidirectional streaming using raw Live API
             async with self.client.aio.live.connect(
@@ -289,10 +349,27 @@ Remember: You're watching the screen through video frames. Comment on what you a
                 # Store session for sending
                 self.live_session = session
                 
-                # Start proactive commentary
-                self.commentary_task = asyncio.create_task(self._proactive_commentary_loop())
+                # Optional: Send a greeting prompt to have the AI initiate conversation
+                # Per best practices: "To have Gemini Live API initiate the conversation, 
+                # include a prompt asking it to greet the user or begin the conversation."
+                try:
+                    greeting_prompt = "Hey StreamBuddy! Say hi and let me know you're ready to co-host."
+                    await session.send_client_content(
+                        turns=types.Content(
+                            role="user",
+                            parts=[types.Part(text=greeting_prompt)],
+                        ),
+                        turn_complete=True,
+                    )
+                    logger.info("Sent greeting prompt to AI")
+                except Exception as e:
+                    logger.warning(f"Failed to send greeting prompt: {e}")
                 
                 # Receive and process responses continuously
+                # We buffer audio chunks for each model turn so that
+                # a single spoken response is played back smoothly,
+                # instead of many tiny, clipped fragments.
+                current_audio_buffer = bytearray()
                 while self.is_active:
                     try:
                         async for response in session.receive():
@@ -301,29 +378,41 @@ Remember: You're watching the screen through video frames. Comment on what you a
                                 break
                             
                             # Handle server content
-                            if hasattr(response, 'server_content') and response.server_content:
+                            if hasattr(response, "server_content") and response.server_content:
                                 server_content = response.server_content
-                                
+
                                 # Handle interruption
                                 if server_content.interrupted:
                                     logger.info("Response interrupted by user")
                                     await self.broadcast_status("AI interrupted", "info")
+                                    # Clear any partial audio for this turn
+                                    current_audio_buffer.clear()
                                     continue
-                                
+
                                 # Handle model turn (AI response)
                                 if server_content.model_turn:
                                     for part in server_content.model_turn.parts:
-                                        # Handle audio data
-                                        if hasattr(part, 'inline_data') and part.inline_data:
+                                        # Handle audio data parts – accumulate them for this turn
+                                        if hasattr(part, "inline_data") and part.inline_data:
                                             audio_bytes = part.inline_data.data
-                                            
+
                                             if isinstance(audio_bytes, bytes) and len(audio_bytes) > 0:
-                                                self.status["responses_generated"] += 1
-                                                logger.info(f"Received audio response: {len(audio_bytes)} bytes")
-                                                
-                                                # Play audio through audio output
-                                                await self._play_audio_response(audio_bytes)
-                                                await self.broadcast_status("AI responded", "info")
+                                                current_audio_buffer.extend(audio_bytes)
+
+                                # When generation for this turn is complete, play the full buffer once
+                                if getattr(server_content, "generation_complete", False) or getattr(
+                                    server_content, "turn_complete", False
+                                ):
+                                    if current_audio_buffer:
+                                        merged = bytes(current_audio_buffer)
+                                        self.status["responses_generated"] += 1
+                                        logger.info(
+                                            f"Playing merged audio response: {len(merged)} bytes "
+                                            f"(chunks_in_turn={len(current_audio_buffer)})"
+                                        )
+                                        await self._play_audio_response(merged)
+                                        await self.broadcast_status("AI responded", "info")
+                                        current_audio_buffer.clear()
                         
                         # After each turn completes, continue to next turn if still active
                         if not self.is_active:
@@ -344,45 +433,7 @@ Remember: You're watching the screen through video frames. Comment on what you a
             self.status["gemini_connected"] = False
             logger.info("Live API stream ended")
     
-    async def _proactive_commentary_loop(self):
-        """Send proactive commentary prompts every 20 seconds"""
-        try:
-            import random
-            
-            prompts = [
-                "Look at the video frames I'm sending you. What do you see on the screen right now? Make a casual, friendly comment about it.",
-                "Based on the video you're seeing, share a quick observation or reaction. What's happening on screen?",
-                "Check out what's on the screen in the video feed. React to it naturally - what catches your attention?",
-                "Take a look at the current video frame. Make a casual remark about what you notice on screen.",
-                "What do you see in the video I'm streaming to you? Comment on something interesting or notable."
-            ]
-            
-            while self.is_active:
-                await asyncio.sleep(20)
-                
-                if not self.is_active or not hasattr(self, 'live_session') or not self.live_session:
-                    break
-                
-                try:
-                    prompt = random.choice(prompts)
-                    await self.live_session.send_client_content(
-                        turns={"role": "user", "parts": [{"text": prompt}]},
-                        turn_complete=True
-                    )
-                    logger.info("Sent proactive commentary prompt")
-                    await self.broadcast_status("AI making casual comment...", "info")
-                except Exception as e:
-                    # Session might be closed
-                    if "1000" in str(e) or "closed" in str(e).lower():
-                        logger.info("Session closed, stopping commentary loop")
-                        break
-                    logger.error(f"Error sending commentary: {e}")
-        
-        except asyncio.CancelledError:
-            logger.info("Commentary loop cancelled")
-        except Exception as e:
-            logger.error(f"Commentary loop error: {e}")
-    
+
     def _forward_video(self, frame):
         """
         Forward video frame to Gemini via ADK session.
@@ -392,21 +443,34 @@ Remember: You're watching the screen through video frames. Comment on what you a
         """
         self.status["frames_captured"] += 1
         
-        if hasattr(self, 'live_session') and self.live_session and self.is_active:
+        if hasattr(self, "live_session") and self.live_session and self.is_active:
             try:
-                # Send frame using ADK session.send_realtime_input()
+                # Send frame to Live audio session for multimodal context
                 # Video format: JPEG images, optimal resolution 768x768, 1 FPS
                 # Schedule in the main event loop from thread
-                if hasattr(self, 'main_loop') and self.main_loop:
+                if hasattr(self, "main_loop") and self.main_loop:
                     asyncio.run_coroutine_threadsafe(
                         self.live_session.send_realtime_input(
                             media=types.Blob(
                                 data=frame.frame_data,
-                                mime_type="image/jpeg"
+                                mime_type="image/jpeg",
                             )
                         ),
-                        self.main_loop
+                        self.main_loop,
                     )
+                    
+                    # Periodically send this frame to captioning model to get a
+                    # concise, grounded textual description of what's on screen.
+                    now = time.time()
+                    if (
+                        self.caption_client
+                        and now - self.last_caption_time >= self.caption_interval_sec
+                    ):
+                        self.last_caption_time = now
+                        asyncio.run_coroutine_threadsafe(
+                            self._caption_and_send(frame),
+                            self.main_loop,
+                        )
                     
                     if self.status["frames_captured"] % 10 == 0:
                         logger.info(f"Sent frame {self.status['frames_captured']}")
@@ -483,6 +547,159 @@ Remember: You're watching the screen through video frames. Comment on what you a
         except Exception as e:
             logger.error(f"Error playing audio: {e}")
     
+    async def _maybe_trigger_voice_comment(self):
+        """
+        Use a lightweight LLM decision helper to determine whether we should
+        send a voice trigger to the Live audio model, based on:
+        - Recent screen caption timeline
+        - Recent conversation / voice history
+        
+        This helps avoid unnecessary or overly frequent voice comments.
+        """
+        if not self.is_active or not self.caption_client or not self.live_session:
+            return
+        
+        now = time.time()
+        # Enforce a minimum spacing between voice triggers
+        if now - self.last_voice_time < self.min_voice_interval_sec:
+            return
+        
+        # Need some recent visual context
+        if not self.screen_timeline:
+            return
+        
+        # Build recent screen timeline (most recent last)
+        recent_screen = self.screen_timeline[-8:]
+        screen_lines = [f"- {e['summary']}" for e in recent_screen]
+        screen_text = "\n".join(screen_lines)
+        
+        # Build recent conversation history (what we've asked the voice model to do)
+        recent_conv = self.conversation_timeline[-5:]
+        if recent_conv:
+            conv_lines = [f"- {e['text']}" for e in recent_conv]
+            conv_text = "\n".join(conv_lines)
+        else:
+            conv_text = "none"
+        
+        decision_prompt = (
+            "You are a decision helper for an AI co-host. "
+            "You receive a recent timeline of what has been visible on the screen, "
+            "and a short history of what the AI has recently said.\n\n"
+            "Recent screen timeline (most recent last):\n"
+            f"{screen_text}\n\n"
+            "Recent AI conversation (most recent last, may be 'none'):\n"
+            f"{conv_text}\n\n"
+            "Decide whether the AI should speak out loud RIGHT NOW.\n"
+            "Say 'YES' if there was a notable, interesting, funny, surprising, or important change "
+            "on screen that deserves a comment, and it would not be redundant with what was "
+            "just said. Say 'NO' if things are routine, repetitive, or nothing important changed, "
+            "or if speaking would be annoying.\n\n"
+            "Respond with exactly one word: YES or NO."
+        )
+        
+        try:
+            decision_resp = await self.caption_client.aio.models.generate_content(
+                model="gemini-2.5-flash",
+                contents=[types.Part.from_text(text=decision_prompt)],
+            )
+            decision_text = (getattr(decision_resp, "text", "") or "").strip().upper()
+        except Exception as e:
+            logger.error(f"Error calling decision helper LLM: {e}", exc_info=True)
+            return
+        
+        if decision_text not in ("YES", "NO"):
+            logger.debug(f"Decision helper returned unexpected text: {decision_text}")
+            return
+        
+        if decision_text == "NO":
+            logger.debug("Decision helper chose NO: skipping voice trigger")
+            return
+        
+        # At this point, we should trigger a voice comment.
+        self.last_voice_time = now
+        
+        # Build a concise context for the voice model based on the latest screen state.
+        latest_summary = recent_screen[-1]["summary"]
+        text_turn = (
+            "Here is a brief description of the current screen:\n"
+            f"- {latest_summary}\n\n"
+            "As StreamBuddy, respond in a natural, conversational way based on this moment on screen."
+            "You can speak freely and follow the flow of the situation, but keep your comments grounded in this situation."
+        )
+        
+        await self.live_session.send_client_content(
+            turns=types.Content(
+                role="user",
+                parts=[types.Part(text=text_turn)],
+            ),
+            turn_complete=True,
+        )
+        
+        # Record this in conversation timeline so future decisions know we spoke
+        event = {
+            "timestamp": now,
+            "text": text_turn,
+        }
+        self.conversation_timeline.append(event)
+        # Persist full conversation history to disk for this session
+        self._append_conversation_log(event)
+    
+    async def _caption_and_send(self, frame):
+        """
+        Every ~5 seconds:
+        - Use gemini-2.5-flash to get a concise, grounded description
+          of the current frame.
+        - Append it to an in-memory text timeline.
+        - Voice triggering is handled separately by a decision helper,
+          so we do NOT directly send a voice prompt from here.
+        """
+        try:
+            if not self.is_active or not self.caption_client:
+                return
+            
+            # Call Gemini 2.5 Flash (multimodal, non-Live) with image + prompt
+            prompt = (
+                "Describe concisely what is happening in this screen image. "
+                "Focus only on what you can clearly see. "
+            )
+            
+            response = await self.caption_client.aio.models.generate_content(
+                model="gemini-2.5-flash",
+                contents=[
+                    types.Part.from_bytes(
+                        data=frame.frame_data,
+                        mime_type="image/jpeg",
+                    ),
+                    types.Part.from_text(text=prompt),
+                ],
+            )
+            
+            summary = (getattr(response, "text", "") or "").strip()
+            if not summary:
+                return
+            
+            # Record in in-memory timeline (sliding window for fast reasoning)
+            now = time.time()
+            self.screen_timeline.append({"timestamp": now, "summary": summary})
+            # Keep only the last ~60 seconds of history
+            cutoff = now - 60.0
+            self.screen_timeline = [
+                e for e in self.screen_timeline if e["timestamp"] >= cutoff
+            ]
+            
+            # Persist full caption log to disk for this session
+            self._append_caption_log(
+                {
+                    "timestamp": now,
+                    "summary": summary,
+                }
+            )
+            
+            logger.info(f"Frame caption (timeline event): {summary}")
+            
+        except Exception as e:
+            logger.error(f"Error in frame captioning pipeline: {e}", exc_info=True)
+    
     async def stop(self) -> Dict[str, Any]:
         """Stop the ADK session"""
         if not self.is_active:
@@ -519,8 +736,85 @@ Remember: You're watching the screen through video frames. Comment on what you a
         return {
             "session_id": self.session_id,
             "duration_seconds": duration,
-            "final_status": self.status
+            "final_status": self.status,
+            "logs_dir": str(self.session_log_dir) if self.session_log_dir else None,
         }
+    
+    # ------------------------------------------------------------------
+    # Session logging helpers (persist full caption + conversation logs)
+    # ------------------------------------------------------------------
+    
+    def _append_caption_log(self, event: Dict[str, Any]) -> None:
+        """Append a caption event to the persistent JSONL log for this session."""
+        if not self.caption_log_path:
+            return
+        try:
+            payload = {
+                "session_id": self.session_id,
+                "type": "caption",
+                **event,
+            }
+            with self.caption_log_path.open("a", encoding="utf-8") as f:
+                f.write(json.dumps(payload, ensure_ascii=False) + "\n")
+        except Exception as e:
+            logger.error(f"Failed to append caption log: {e}", exc_info=True)
+    
+    def _append_conversation_log(self, event: Dict[str, Any]) -> None:
+        """Append a conversation event to the persistent JSONL log for this session."""
+        if not self.conversation_log_path:
+            return
+        try:
+            payload = {
+                "session_id": self.session_id,
+                "type": "conversation",
+                **event,
+            }
+            with self.conversation_log_path.open("a", encoding="utf-8") as f:
+                f.write(json.dumps(payload, ensure_ascii=False) + "\n")
+        except Exception as e:
+            logger.error(f"Failed to append conversation log: {e}", exc_info=True)
+    
+    async def _proactive_commentary_loop(self):
+        """
+        Periodically prompt the model to provide short, co-host style reactions.
+        
+        Rationale:
+        - In practice, relying only on proactive audio can lead to the model
+          speaking once and then staying silent.
+        - This loop gently asks the model to react to the last few seconds
+          of audio/video, so the agent keeps engaging the streamer.
+        """
+        try:
+            # Wait until the Live session is connected
+            while self.is_active and (self.live_session is None or not self.status.get("gemini_connected")):
+                await asyncio.sleep(0.2)
+            
+            if not self.is_active:
+                return
+            
+            logger.info("Starting proactive commentary loop")
+            
+            # Main loop: every N seconds, consider asking for a brief reaction.
+            # A separate decision helper LLM will decide whether we should
+            # actually trigger a voice response based on the recent screen
+            # timeline and conversation history.
+            while self.is_active and self.live_session is not None and self.status.get("gemini_connected"):
+                # Tune this interval to how chatty you want StreamBuddy to be
+                await asyncio.sleep(20)
+                
+                if not self.is_active or self.live_session is None:
+                    break
+                
+                try:
+                    await self._maybe_trigger_voice_comment()
+                except Exception as e:
+                    logger.error(f"Error in proactive commentary decision loop: {e}", exc_info=True)
+                    await asyncio.sleep(5)
+        
+        except asyncio.CancelledError:
+            logger.info("Proactive commentary loop cancelled")
+        except Exception as e:
+            logger.error(f"Proactive commentary loop crashed: {e}", exc_info=True)
     
     async def broadcast_status(self, message: str, level: str = "info"):
         """Broadcast status to WebSocket clients"""

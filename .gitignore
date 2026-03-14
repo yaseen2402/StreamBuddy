@@ -4,6 +4,7 @@
 .env.local
 .env.*.local
 
+streambuddy_sessions/
 # Python
 __pycache__/
 *.py[cod]
