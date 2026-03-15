@@ -56,8 +56,8 @@ StreamBuddy is a real-time AI companion for live streamers that provides natural
 
 5. **frontend**  
    ```
-   cd frontend
    npm install  # First time only
+   cd frontend
    npm run dev
    ```
 

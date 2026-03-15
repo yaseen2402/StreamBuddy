@@ -88,8 +88,14 @@ class YouTubeConnection:
         self.credentials = None
         self.metrics = ConnectionMetrics()
         self._connection_start_time: Optional[float] = None
-        
+        self._last_error: Optional[str] = None
+
         logger.info("YouTube connection manager initialized")
+
+    @property
+    def last_error_message(self) -> Optional[str]:
+        """User-facing message from the last failed connection attempt."""
+        return self._last_error
     
     def _update_state(self, new_state: ConnectionState) -> None:
         """
@@ -221,8 +227,9 @@ class YouTubeConnection:
                 return True
             
             # Connection failed
+            self._last_error = error_msg
             logger.warning(f"Connection attempt {attempt + 1} failed: {error_msg}")
-            
+
             # If not the last attempt, wait before retrying
             if attempt < self.retry_config.max_attempts - 1:
                 delay = self.retry_config.get_delay(attempt)

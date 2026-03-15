@@ -4,13 +4,42 @@
 
 @layer base {
   body {
-    @apply bg-gradient-to-br from-slate-900 via-purple-900 to-slate-900 min-h-screen;
+    @apply min-h-screen text-gray-900 antialiased;
+    background: linear-gradient(135deg, #0f172a 0%, #1e1b4b 35%, #312e81 70%, #1e293b 100%);
+    background-attachment: fixed;
+  }
+
+  body::before {
+    content: '';
+    position: fixed;
+    inset: 0;
+    background-image:
+      radial-gradient(ellipse 80% 50% at 50% -20%, rgba(99, 102, 241, 0.15), transparent),
+      radial-gradient(ellipse 60% 40% at 100% 100%, rgba(139, 92, 246, 0.1), transparent),
+      radial-gradient(ellipse 50% 30% at 0% 80%, rgba(99, 102, 241, 0.08), transparent);
+    pointer-events: none;
+    z-index: 0;
   }
 }
 
 @layer components {
   .card {
-    @apply bg-white rounded-xl shadow-lg p-6;
+    @apply relative rounded-2xl p-6;
+    background: rgba(255, 255, 255, 0.97);
+    box-shadow:
+      0 0 0 1px rgba(255, 255, 255, 0.1),
+      0 4px 6px -1px rgba(0, 0, 0, 0.2),
+      0 10px 25px -5px rgba(0, 0, 0, 0.15),
+      0 0 40px -10px rgba(99, 102, 241, 0.12);
+    transition: box-shadow 0.2s ease, transform 0.2s ease;
+  }
+
+  .card:hover {
+    box-shadow:
+      0 0 0 1px rgba(255, 255, 255, 0.15),
+      0 8px 12px -2px rgba(0, 0, 0, 0.2),
+      0 20px 40px -10px rgba(0, 0, 0, 0.2),
+      0 0 50px -10px rgba(99, 102, 241, 0.18);
   }
   
   .btn {
@@ -18,11 +47,21 @@
   }
   
   .btn-primary {
-    @apply bg-primary-600 text-white hover:bg-primary-700 hover:shadow-lg hover:-translate-y-0.5;
+    @apply bg-primary-600 text-white hover:bg-primary-700 hover:-translate-y-0.5 active:translate-y-0;
+    transition: box-shadow 0.2s ease;
   }
-  
+
+  .btn-primary:hover {
+    box-shadow: 0 10px 40px -10px rgba(99, 102, 241, 0.4);
+  }
+
   .btn-danger {
-    @apply bg-red-600 text-white hover:bg-red-700 hover:shadow-lg;
+    @apply bg-red-600 text-white hover:bg-red-700;
+    transition: box-shadow 0.2s ease;
+  }
+
+  .btn-danger:hover {
+    box-shadow: 0 10px 40px -10px rgba(239, 68, 68, 0.35);
   }
   
   .btn-secondary {
@@ -46,22 +85,22 @@
   }
 }
 
-/* Custom scrollbar */
+/* Custom scrollbar - theme-aware */
 ::-webkit-scrollbar {
   width: 8px;
   height: 8px;
 }
 
 ::-webkit-scrollbar-track {
-  background: rgba(0, 0, 0, 0.1);
+  background: rgba(30, 27, 75, 0.5);
   border-radius: 4px;
 }
 
 ::-webkit-scrollbar-thumb {
-  background: rgba(0, 0, 0, 0.3);
+  background: rgba(99, 102, 241, 0.4);
   border-radius: 4px;
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: rgba(0, 0, 0, 0.5);
+  background: rgba(99, 102, 241, 0.6);
 }

@@ -13,6 +13,12 @@ export const streamBuddyAPI = {
     const response = await api.get('/status')
     return response.data
   },
+
+  // Check if YouTube account is connected (token stored on backend)
+  getYouTubeStatus: async () => {
+    const response = await api.get('/youtube/status')
+    return response.data
+  },
   
   // Start session
   startSession: async (config) => {

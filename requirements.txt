@@ -12,6 +12,8 @@ google-api-python-client==2.156.0  # YouTube API client
 opencv-python==4.10.0.84
 Pillow==10.4.0  # Image processing for video/screen capture
 mss==9.0.1  # Screen capture for local testing
+yt-dlp==2025.1.26  # Resolve YouTube URLs to direct stream URLs for video capture
+google-auth-oauthlib==1.2.1  # OAuth flow for YouTube authorization
 
 # Google Agent Development Kit (ADK)
 google-genai==1.65.0

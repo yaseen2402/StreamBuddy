@@ -18,6 +18,12 @@ import numpy as np
 from threading import Thread, Event, Lock
 from queue import Queue, Empty
 
+try:
+    # yt_dlp is used to resolve YouTube URLs to direct stream URLs
+    import yt_dlp  # type: ignore
+except Exception:  # pragma: no cover - optional dependency
+    yt_dlp = None
+
 from streambuddy_agent.models import VideoFrame
 
 # Configure logging
@@ -323,6 +329,38 @@ class VideoCapture:
         
         logger.info("Video capture loop stopped")
     
+    def _resolve_youtube_source(self, url: str) -> Optional[str]:
+        """
+        Resolve a YouTube (or youtu.be) URL to a direct video stream URL
+        using yt_dlp. Returns None on failure.
+        """
+        if yt_dlp is None:
+            logger.error(
+                "yt_dlp is not installed. Install it to enable YouTube URL capture "
+                "(e.g. pip install yt-dlp)."
+            )
+            return None
+
+        ydl_opts = {
+            "format": "best[ext=mp4]/best",
+            "quiet": True,
+            "nocheckcertificate": True,
+            "noplaylist": True,
+        }
+
+        try:
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(url, download=False)
+                stream_url = info.get("url")
+                if not stream_url:
+                    logger.error("yt_dlp did not return a stream URL for YouTube link")
+                    return None
+                logger.info("Resolved YouTube URL to direct stream URL via yt_dlp")
+                return stream_url
+        except Exception as e:
+            logger.error(f"Failed to resolve YouTube URL with yt_dlp: {e}")
+            return None
+
     def start_capture(self, video_source: str) -> bool:
         """
         Start video capture from specified source.
@@ -340,9 +378,23 @@ class VideoCapture:
             return True
         
         try:
-            # Open video source
-            logger.info(f"Opening video source: {video_source}")
-            self._video_source = cv2.VideoCapture(video_source)
+            source_to_open = video_source
+
+            # If this looks like a YouTube URL, resolve it first
+            lower_src = str(video_source).lower()
+            if lower_src.startswith("http") and (
+                "youtube.com" in lower_src or "youtu.be" in lower_src
+            ):
+                logger.info(f"Resolving YouTube video source via yt_dlp: {video_source}")
+                resolved = self._resolve_youtube_source(video_source)
+                if not resolved:
+                    logger.error("Unable to resolve YouTube URL to a direct stream")
+                    return False
+                source_to_open = resolved
+
+            # Open video source (URL, file path, or device index)
+            logger.info(f"Opening video source: {source_to_open}")
+            self._video_source = cv2.VideoCapture(source_to_open)
             
             if not self._video_source.isOpened():
                 logger.error(f"Failed to open video source: {video_source}")

@@ -3,6 +3,8 @@
 *.env
 .env.local
 .env.*.local
+client_secret.json
+youtube_token.json
 
 streambuddy_sessions/
 # Python

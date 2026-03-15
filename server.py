@@ -21,8 +21,9 @@ from dotenv import load_dotenv
 # Load environment variables
 load_dotenv()
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import RedirectResponse, HTMLResponse
 from pydantic import BaseModel
 import uvicorn
 
@@ -34,7 +35,9 @@ from google.genai import types
 from streambuddy_agent.screen_capture import ScreenCapture, ScreenConfig
 from streambuddy_agent.video_capture import VideoCapture, VideoConfig
 from streambuddy_agent.audio_capture import AudioCapture, AudioConfig
-from streambuddy_agent.models import PersonalityConfig
+from streambuddy_agent.youtube_connection import YouTubeConnection
+from streambuddy_agent.chat_capture import ChatCapture, ChatConfig
+from streambuddy_agent.models import PersonalityConfig, ChatMessage
 
 # Configure logging
 logging.basicConfig(
@@ -87,10 +90,13 @@ class ADKStreamBuddySession:
         self.screen_capture: Optional[ScreenCapture] = None
         self.video_capture: Optional[VideoCapture] = None
         self.audio_capture: Optional[AudioCapture] = None
+        self.youtube_connection: Optional[YouTubeConnection] = None
+        self.chat_capture: Optional[ChatCapture] = None
         
         # Background tasks
         self.stream_task: Optional[asyncio.Task] = None
         self.commentary_task: Optional[asyncio.Task] = None
+        self.chat_analysis_task: Optional[asyncio.Task] = None
         
         # Session resumption
         self.session_handle: Optional[str] = None
@@ -103,8 +109,10 @@ class ADKStreamBuddySession:
             "gemini_connected": False,
             "video_capturing": False,
             "audio_capturing": False,
+            "chat_capturing": False,
             "frames_captured": 0,
             "audio_chunks_captured": 0,
+            "chat_messages_captured": 0,
             "responses_generated": 0
         }
         
@@ -117,7 +125,19 @@ class ADKStreamBuddySession:
         # Text timeline of what has been happening on screen
         # Each entry: {"timestamp": float, "summary": str}
         self.screen_timeline: list[Dict[str, Any]] = []
-        
+        # Recent chat messages timeline (raw ChatMessage objects)
+        self.chat_timeline: list[ChatMessage] = []
+
+        # High-level chat analysis for UI
+        self.last_chat_summary: Optional[str] = None
+        self.last_chat_mood: Optional[str] = None
+        self.last_chat_topics: Optional[list[str]] = None
+
+        # Chat analysis controls
+        self.last_chat_analysis_time: float = 0.0
+        # How often to run chat analysis (seconds)
+        self.chat_analysis_interval_sec: float = 15.0
+
         # Conversation / voice timeline (what we've asked the voice model to do)
         # Each entry: {"timestamp": float, "text": str}
         self.conversation_timeline: list[Dict[str, Any]] = []
@@ -146,7 +166,8 @@ class ADKStreamBuddySession:
         self.mode = config.mode
         self.session_id = f"adk_session_{int(datetime.now().timestamp())}"
         self.start_time = datetime.now()
-        
+        youtube_connection_error = None
+
         # Create a directory for this session's persistent logs
         try:
             base_log_dir = Path("streambuddy_sessions")
@@ -223,31 +244,75 @@ class ADKStreamBuddySession:
                 await self.broadcast_status("Screen capture failed", "error")
         
         elif config.mode == "youtube":
-            # YouTube mode: Video capture from YouTube Live stream
-            from streambuddy_agent.video_capture import VideoCapture, VideoConfig
-            
-            video_config = VideoConfig(
-                frame_rate=1.0,
-                max_dimension=768,
-                jpeg_quality=85,
-                buffer_size=50
-            )
-            self.video_capture = VideoCapture(
-                config=video_config,
-                forward_callback=self._forward_video
-            )
-            
-            # For YouTube Live, we'd need the stream URL
-            # For now, fallback to webcam as placeholder
-            video_source = config.video_source or "0"
-            
-            if self.video_capture.start_capture(video_source):
-                self.status["video_capturing"] = True
-                logger.info(f"✓ Video capture started (source: {video_source})")
-                await self.broadcast_status(f"Video capture started (YouTube mode)")
+            # YouTube mode: live chat capture (no video) from the creator's channel.
+            # Prefer an explicit token from the request; otherwise fall back to a
+            # locally stored token file written by the OAuth callback.
+            youtube_token = config.youtube_oauth_token
+            if not youtube_token:
+                token_path = Path("youtube_token.json")
+                if token_path.exists():
+                    try:
+                        youtube_token = token_path.read_text(encoding="utf-8")
+                        logger.info("Loaded YouTube OAuth token from youtube_token.json")
+                    except Exception as e:
+                        logger.error(f"Failed to read youtube_token.json: {e}")
+
+            if not youtube_token:
+                raise ValueError(
+                    "YouTube OAuth token not available. "
+                    "Connect your YouTube account first via /auth/youtube/start "
+                    "or provide youtube_oauth_token in the request."
+                )
+
+            # Establish YouTube API connection
+            self.youtube_connection = YouTubeConnection()
+            if not self.youtube_connection.connect(youtube_token):
+                logger.error("✗ Failed to connect to YouTube Live API")
+                await self.broadcast_status("YouTube connection failed", "error")
+                raw = getattr(self.youtube_connection, "last_error_message", None) or ""
+                if "liveStreamingNotEnabled" in raw or "not enabled for live streaming" in raw:
+                    youtube_connection_error = (
+                        "Your YouTube channel is not enabled for live streaming. "
+                        "Enable it at https://www.youtube.com/features and try again."
+                    )
+                elif "accessNotConfigured" in raw or "has not been used" in raw:
+                    youtube_connection_error = (
+                        "YouTube Data API v3 is not enabled for this project. "
+                        "Enable it in Google Cloud Console and try again."
+                    )
+                else:
+                    youtube_connection_error = (
+                        "Could not connect to YouTube. Check your token and channel settings."
+                    )
             else:
-                logger.error("✗ Video capture failed")
-                await self.broadcast_status("Video capture failed", "error")
+                logger.info("✓ Connected to YouTube Live API for chat")
+                await self.broadcast_status("YouTube Live chat connected", "info")
+
+                # Start chat capture, forwarding messages into the Live session
+                chat_config = ChatConfig(
+                    poll_interval_ms=2000,
+                    max_results=200,
+                    buffer_size=200,
+                    reconnect_delay_ms=5000,
+                )
+                self.chat_capture = ChatCapture(
+                    youtube_connection=self.youtube_connection,
+                    config=chat_config,
+                    forward_callback=self._handle_chat_message,
+                )
+
+                if self.chat_capture.start_capture():
+                    self.status["chat_capturing"] = True
+                    logger.info("✓ YouTube chat capture started")
+                    await self.broadcast_status("YouTube chat capture started", "info")
+                    # Start background chat analysis loop
+                    if self.chat_analysis_task is None or self.chat_analysis_task.done():
+                        self.chat_analysis_task = asyncio.create_task(
+                            self._chat_analysis_loop()
+                        )
+                else:
+                    logger.error("✗ Failed to start YouTube chat capture")
+                    await self.broadcast_status("YouTube chat capture failed", "error")
         
         # Start audio capture
         audio_config = AudioConfig(
@@ -279,13 +344,16 @@ class ADKStreamBuddySession:
         
         logger.info("✓ ADK streaming started")
         await self.broadcast_status("StreamBuddy is now active!", "success")
-        
-        return {
+
+        out = {
             "session_id": self.session_id,
             "mode": self.mode,
             "status": self.status,
-            "start_time": self.start_time.isoformat()
+            "start_time": self.start_time.isoformat(),
         }
+        if config.mode == "youtube" and youtube_connection_error:
+            out["youtube_connection_error"] = youtube_connection_error
+        return out
     
     async def _run_adk_stream(self):
         """Main streaming loop using raw Live API (google.genai)"""
@@ -521,6 +589,172 @@ You are StreamBuddy, a casual and friendly AI co-host for live streaming. You sp
             except Exception as e:
                 logger.error(f"Error forwarding audio: {e}")
     
+    def _handle_chat_message(self, message: ChatMessage) -> None:
+        """
+        Callback from ChatCapture for each new YouTube live chat message.
+        Stores recent messages and schedules analysis; does NOT directly
+        send every message to the Live session.
+        """
+        # Update simple metrics and in-memory chat timeline
+        self.status["chat_messages_captured"] += 1
+        now = time.time()
+        # Normalize timestamp to "now" in case of clock skew
+        message.timestamp = now
+        self.chat_timeline.append(message)
+        # Keep only the last ~60 seconds of chat for quick context
+        cutoff = now - 60.0
+        self.chat_timeline = [
+            m for m in self.chat_timeline if m.timestamp >= cutoff
+        ]
+
+        # Analysis is handled by the background _chat_analysis_loop
+
+    async def _send_chat_message_to_live(self, message: ChatMessage) -> None:
+        """
+        Send a selected chat message into the Gemini Live session as user text,
+        so the agent can choose to respond with audio.
+        """
+        if not self.live_session or not self.is_active:
+            return
+
+        try:
+            text_turn = (
+                f"Viewer {message.username} says: {message.content}\n\n"
+                "As StreamBuddy, respond out loud only if this message "
+                "is interesting, emotional, funny, or clearly calling for a reply. "
+                "Keep your response short and conversational."
+            )
+
+            await self.live_session.send_client_content(
+                turns=types.Content(
+                    role="user",
+                    parts=[types.Part(text=text_turn)],
+                ),
+                turn_complete=True,
+            )
+            await self.broadcast_status(
+                f"Chat message sent to AI from {message.username}", "info"
+            )
+        except Exception as e:
+            logger.error(f"Error sending chat message to Live session: {e}")
+
+    async def _chat_analysis_loop(self) -> None:
+        """
+        Periodically analyze recent chat messages with a lightweight LLM to:
+        - Select a few high-signal messages for StreamBuddy to respond to.
+        - Compute a short summary/mood/topics for the UI.
+        """
+        try:
+            # Wait until caption_client (helper client) is ready
+            while self.is_active and not self.caption_client:
+                await asyncio.sleep(0.2)
+
+            if not self.is_active:
+                return
+
+            logger.info("Starting chat analysis loop")
+
+            while (
+                self.is_active
+                and self.chat_capture is not None
+                and self.status.get("chat_capturing")
+            ):
+                await asyncio.sleep(self.chat_analysis_interval_sec)
+
+                if not self.is_active or not self.chat_timeline:
+                    continue
+
+                # Snapshot recent messages to avoid mutation during analysis
+                recent_messages = list(self.chat_timeline[-50:])
+                if not recent_messages:
+                    continue
+
+                # Build JSON-like lines for the helper model
+                lines = []
+                for m in recent_messages:
+                    # Truncate overly long content for prompt safety
+                    content = m.content
+                    if len(content) > 300:
+                        content = content[:297] + "..."
+                    lines.append(
+                        {
+                            "message_id": m.message_id,
+                            "username": m.username,
+                            "content": content,
+                        }
+                    )
+
+                import json
+
+                analysis_prompt = (
+                    "You are analyzing a fast YouTube live chat. "
+                    "You will receive a JSON array called messages, where each item has "
+                    "message_id, username, and content.\n\n"
+                    "Your job:\n"
+                    "1) Choose up to 3 messages that the streamer’s AI co-host should respond to "
+                    "(interesting, emotional, questions, jokes, or representative of the crowd).\n"
+                    "2) Provide a short overall summary of what the chat is talking about.\n"
+                    "3) Provide a one- or two-word mood label (e.g., 'hyped', 'confused', 'toxic', "
+                    "'chill', 'supportive').\n"
+                    "4) Provide a few short topic tags.\n\n"
+                    "Respond ONLY with minified JSON in this exact schema:\n"
+                    '{\"selected_ids\":[\"id1\",\"id2\"],'
+                    "\"summary\":\"...\","
+                    "\"mood\":\"...\","
+                    "\"topics\":[\"tag1\",\"tag2\"]}"
+                    "\n\nmessages:\n"
+                    f"{json.dumps(lines, ensure_ascii=False)}"
+                )
+
+                try:
+                    decision_resp = await self.caption_client.aio.models.generate_content(
+                        model="gemini-2.5-flash",
+                        contents=[types.Part.from_text(text=analysis_prompt)],
+                    )
+                    raw_text = (getattr(decision_resp, "text", "") or "").strip()
+                except Exception as e:
+                    logger.error(f"Error calling chat analysis LLM: {e}", exc_info=True)
+                    continue
+
+                try:
+                    parsed = json.loads(raw_text)
+                    selected_ids = parsed.get("selected_ids") or []
+                    summary = parsed.get("summary") or ""
+                    mood = parsed.get("mood") or ""
+                    topics = parsed.get("topics") or []
+                except Exception as e:
+                    logger.error(f"Failed to parse chat analysis JSON: {e} - {raw_text}")
+                    continue
+
+                # Update high-level chat state for UI
+                self.last_chat_summary = summary.strip() or None
+                self.last_chat_mood = mood.strip() or None
+                self.last_chat_topics = topics if isinstance(topics, list) else None
+                self.last_chat_analysis_time = time.time()
+
+                await self.broadcast_status("Chat analysis updated", "info")
+
+                # Map IDs to messages for quick lookup
+                msg_by_id = {m.message_id: m for m in recent_messages}
+
+                # Send selected messages into Live session
+                if self.live_session and selected_ids:
+                    for mid in selected_ids[:3]:
+                        m = msg_by_id.get(mid)
+                        if not m:
+                            continue
+                        try:
+                            await self._send_chat_message_to_live(m)
+                        except Exception as e:
+                            logger.error(
+                                f"Failed to send selected chat message {mid} to Live: {e}"
+                            )
+
+        except asyncio.CancelledError:
+            logger.info("Chat analysis loop cancelled")
+        except Exception as e:
+            logger.error(f"Chat analysis loop crashed: {e}", exc_info=True)
+    
     async def _play_audio_response(self, audio_bytes: bytes):
         """Play audio response through audio output service"""
         try:
@@ -718,6 +952,11 @@ You are StreamBuddy, a casual and friendly AI co-host for live streaming. You sp
         if self.audio_capture:
             self.audio_capture.stop_capture()
             self.status["audio_capturing"] = False
+        if self.chat_capture:
+            self.chat_capture.stop_capture()
+            self.status["chat_capturing"] = False
+        if self.youtube_connection:
+            self.youtube_connection.disconnect()
         
         # Stop audio output
         if self.audio_output:
@@ -728,6 +967,8 @@ You are StreamBuddy, a casual and friendly AI co-host for live streaming. You sp
             self.stream_task.cancel()
         if self.commentary_task:
             self.commentary_task.cancel()
+        if self.chat_analysis_task:
+            self.chat_analysis_task.cancel()
         
         duration = (datetime.now() - self.start_time).total_seconds() if self.start_time else 0
         
@@ -861,10 +1102,55 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+YOUTUBE_OAUTH_SCOPES = ["https://www.googleapis.com/auth/youtube.readonly"]
+YOUTUBE_OAUTH_CLIENT_SECRET_FILE = os.getenv(
+    "YOUTUBE_OAUTH_CLIENT_SECRET_FILE", "client_secret.json"
+)
+YOUTUBE_OAUTH_REDIRECT_URI = os.getenv(
+    "YOUTUBE_OAUTH_REDIRECT_URI", "http://localhost:8000/auth/youtube/callback"
+)
+FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:3000")
+
+@app.get("/", response_class=HTMLResponse)
+async def root():
+    """
+    Simple landing page with links to key actions, including YouTube auth.
+    """
+    html = """
+    <html>
+      <head><title>StreamBuddy Backend</title></head>
+      <body>
+        <h1>StreamBuddy Backend</h1>
+        <p>Use these links during development:</p>
+        <ul>
+          <li><a href="/auth/youtube/start">Connect your YouTube account</a></li>
+          <li><a href="/docs">Open FastAPI docs</a></li>
+          <li><a href="/api/status">View current session status (JSON)</a></li>
+        </ul>
+      </body>
+    </html>
+    """
+    return HTMLResponse(content=html)
+
+
 @app.get("/api/status")
 async def get_status():
     """Get current session status"""
     return session_manager.get_status()
+
+
+@app.get("/api/youtube/status")
+async def get_youtube_status():
+    """Return whether a YouTube OAuth token is stored (account connected)."""
+    token_path = Path("youtube_token.json")
+    connected = False
+    if token_path.exists():
+        try:
+            data = json.loads(token_path.read_text(encoding="utf-8"))
+            connected = bool(data.get("refresh_token") or data.get("access_token"))
+        except Exception:
+            pass
+    return {"connected": connected}
 
 @app.post("/api/session/start")
 async def start_session(request: StartSessionRequest):
@@ -908,6 +1194,126 @@ async def websocket_endpoint(websocket: WebSocket):
     finally:
         if websocket in session_manager.websocket_connections:
             session_manager.websocket_connections.remove(websocket)
+
+
+@app.get("/auth/youtube/start")
+async def youtube_oauth_start():
+    """
+    Start YouTube OAuth flow.
+    Redirects the user to Google's consent screen. Requires a client_secret.json file
+    or YOUTUBE_OAUTH_CLIENT_SECRET_FILE path, and YOUTUBE_OAUTH_REDIRECT_URI must
+    match the redirect URI configured in the Google Cloud Console.
+    """
+    try:
+        from google_auth_oauthlib.flow import Flow
+    except ImportError:
+        raise HTTPException(
+            status_code=500,
+            detail="google-auth-oauthlib is not installed. "
+            "Install dependencies with `pip install -r requirements.txt`.",
+        )
+
+    if not os.path.exists(YOUTUBE_OAUTH_CLIENT_SECRET_FILE):
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                f"OAuth client secrets file not found at "
+                f"{YOUTUBE_OAUTH_CLIENT_SECRET_FILE}. "
+                "Download your OAuth 2.0 client JSON from Google Cloud Console and "
+                "save it as this file, or set YOUTUBE_OAUTH_CLIENT_SECRET_FILE."
+            ),
+        )
+
+    flow = Flow.from_client_secrets_file(
+        YOUTUBE_OAUTH_CLIENT_SECRET_FILE,
+        scopes=YOUTUBE_OAUTH_SCOPES,
+        redirect_uri=YOUTUBE_OAUTH_REDIRECT_URI,
+    )
+
+    auth_url, state = flow.authorization_url(
+        access_type="offline",
+        include_granted_scopes="true",
+        prompt="consent",
+    )
+
+    # For this minimal flow we do not persist state; single-user dev is fine.
+    return RedirectResponse(auth_url)
+
+
+@app.get("/auth/youtube/callback")
+async def youtube_oauth_callback(request: Request):
+    """
+    OAuth callback endpoint for YouTube.
+    Exchanges the authorization code for tokens and returns a JSON object that
+    can be pasted into the UI as youtube_oauth_token for testing.
+    """
+    try:
+        from google_auth_oauthlib.flow import Flow
+    except ImportError:
+        raise HTTPException(
+            status_code=500,
+            detail="google-auth-oauthlib is not installed. "
+            "Install dependencies with `pip install -r requirements.txt`.",
+        )
+
+    if "code" not in request.query_params:
+        raise HTTPException(status_code=400, detail="Missing authorization code")
+
+    # Allow HTTP redirect_uri on localhost (oauthlib requires HTTPS by default)
+    if "localhost" in YOUTUBE_OAUTH_REDIRECT_URI or "127.0.0.1" in YOUTUBE_OAUTH_REDIRECT_URI:
+        os.environ["OAUTHLIB_INSECURE_TRANSPORT"] = "1"
+
+    if not os.path.exists(YOUTUBE_OAUTH_CLIENT_SECRET_FILE):
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                f"OAuth client secrets file not found at "
+                f"{YOUTUBE_OAUTH_CLIENT_SECRET_FILE}."
+            ),
+        )
+
+    flow = Flow.from_client_secrets_file(
+        YOUTUBE_OAUTH_CLIENT_SECRET_FILE,
+        scopes=YOUTUBE_OAUTH_SCOPES,
+        redirect_uri=YOUTUBE_OAUTH_REDIRECT_URI,
+    )
+
+    # Use the same redirect_uri as in the auth request (localhost vs 127.0.0.1 must
+    # match), and keep only the query string from the incoming request.
+    from urllib.parse import urlparse
+    parsed = urlparse(str(request.url))
+    redirect_base = YOUTUBE_OAUTH_REDIRECT_URI.split("?")[0]
+    authorization_response = f"{redirect_base}?{parsed.query}"
+
+    try:
+        flow.fetch_token(authorization_response=authorization_response)
+    except Exception as e:
+        logger.error(f"Failed to fetch YouTube OAuth token: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to fetch OAuth tokens")
+
+    credentials = flow.credentials
+
+    token_payload = {
+        "access_token": credentials.token,
+        "refresh_token": credentials.refresh_token,
+        "token_uri": credentials.token_uri,
+        "client_id": credentials.client_id,
+        "client_secret": credentials.client_secret,
+        "scopes": list(credentials.scopes or []),
+    }
+
+    # Persist token payload locally for development so YouTube mode can use it
+    # automatically without copy/paste.
+    try:
+        token_path = Path("youtube_token.json")
+        token_path.write_text(json.dumps(token_payload, indent=2), encoding="utf-8")
+        logger.info(f"YouTube OAuth tokens saved to {token_path}")
+    except Exception as e:
+        logger.error(f"Failed to save YouTube OAuth token to file: {e}", exc_info=True)
+
+    # Redirect back to frontend so user lands in the app
+    redirect_url = f"{FRONTEND_URL.rstrip('/')}/?youtube_connected=1"
+    return RedirectResponse(url=redirect_url, status_code=302)
 
 # ============================================================================
 # Main Entry Point

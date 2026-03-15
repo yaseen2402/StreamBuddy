@@ -6,7 +6,7 @@ const useStreamBuddyStore = create((set, get) => ({
   
   // Session state
   sessionId: null,
-  mode: 'local',
+  mode: 'youtube', // 'local' commented out in UI for now
   isActive: false,
   startTime: null,
   
@@ -45,9 +45,18 @@ const useStreamBuddyStore = create((set, get) => ({
       level: 'info',
     },
   ],
-  
+
+  // Toast notification (e.g. YouTube connection error)
+  toast: null,
+
   // Actions
   setWsConnected: (connected) => set({ wsConnected: connected }),
+
+  setToast: (message, level = 'error') => set({
+    toast: message ? { message, level } : null,
+  }),
+
+  clearToast: () => set({ toast: null }),
   
   setMode: (mode) => set({ mode }),
   
@@ -86,6 +95,7 @@ const useStreamBuddyStore = create((set, get) => ({
     sessionId: null,
     isActive: false,
     startTime: null,
+    toast: null,
     status: {
       gemini_connected: false,
       video_capturing: false,

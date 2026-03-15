@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { Bot, Video, Mic, Volume2 } from 'lucide-react'
+import { Bot, Video, Mic, Volume2, BarChart2 } from 'lucide-react'
 import useStreamBuddyStore from '../store/useStreamBuddyStore'
 
 const StatusPanel = () => {
@@ -57,7 +57,7 @@ const StatusPanel = () => {
   return (
     <div className="card">
       <h2 className="text-xl font-bold mb-4 flex items-center gap-2">
-        <span>📊</span>
+        <BarChart2 className="w-5 h-5 text-primary-600" />
         <span>Status</span>
       </h2>
       

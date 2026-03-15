@@ -1,5 +1,5 @@
-import { useState } from 'react'
-import { Play, Square } from 'lucide-react'
+import { useState, useEffect } from 'react'
+import { Play, Square, CheckCircle } from 'lucide-react'
 import useStreamBuddyStore from '../store/useStreamBuddyStore'
 import { streamBuddyAPI } from '../services/api'
 
@@ -13,9 +13,39 @@ const ConfigPanel = () => {
     setSessionData,
     clearSession,
     addLogEntry,
+    setToast,
   } = useStreamBuddyStore()
-  
+
   const [loading, setLoading] = useState(false)
+  const [youtubeConnected, setYoutubeConnected] = useState(false)
+  const [youtubeStatusLoading, setYoutubeStatusLoading] = useState(false)
+
+  const fetchYouTubeStatus = async () => {
+    if (mode !== 'youtube') return
+    setYoutubeStatusLoading(true)
+    try {
+      const { connected } = await streamBuddyAPI.getYouTubeStatus()
+      setYoutubeConnected(!!connected)
+    } catch {
+      setYoutubeConnected(false)
+    } finally {
+      setYoutubeStatusLoading(false)
+    }
+  }
+
+  useEffect(() => {
+    fetchYouTubeStatus()
+  }, [mode])
+
+  // When returning from OAuth redirect with ?youtube_connected=1, refresh status
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search)
+    if (params.get('youtube_connected') === '1') {
+      fetchYouTubeStatus()
+      // Clean URL without reload
+      window.history.replaceState({}, '', window.location.pathname)
+    }
+  }, [])
   
   const handleStart = async () => {
     setLoading(true)
@@ -35,6 +65,10 @@ const ConfigPanel = () => {
         start_time: result.start_time,
         status: result.status,
       })
+
+      if (result.youtube_connection_error) {
+        setToast(result.youtube_connection_error, 'error')
+      }
       
       addLogEntry('StreamBuddy started successfully!', 'success')
     } catch (error) {
@@ -63,35 +97,53 @@ const ConfigPanel = () => {
   
   return (
     <div className="space-y-3">
-      {/* Screen Monitor (Local Mode) */}
-      {mode === 'local' && (
-        <div>
-          <label className="block text-xs font-semibold text-gray-700 mb-1">Screen Monitor</label>
-          <select
-            value={config.videoSource}
-            onChange={(e) => setConfig({ videoSource: e.target.value })}
-            disabled={isActive}
-            className="w-full px-3 py-2 text-sm border-2 border-gray-200 rounded-lg focus:border-primary-600 focus:outline-none disabled:opacity-50"
-          >
-            <option value="0">Primary</option>
-            <option value="1">Secondary</option>
-            <option value="2">Third</option>
-          </select>
-        </div>
-      )}
-      
-      {/* YouTube OAuth Token (YouTube Mode) */}
+      {/* Local mode – Screen Monitor block commented out for now */}
+
+      {/* YouTube OAuth (YouTube Mode) */}
       {mode === 'youtube' && (
         <div>
-          <label className="block text-xs font-semibold text-gray-700 mb-1">YouTube OAuth</label>
-          <input
-            type="password"
-            value={config.youtubeOAuthToken}
-            onChange={(e) => setConfig({ youtubeOAuthToken: e.target.value })}
-            disabled={isActive}
-            placeholder="Enter token"
-            className="w-full px-3 py-2 text-sm border-2 border-gray-200 rounded-lg focus:border-primary-600 focus:outline-none disabled:opacity-50"
-          />
+          <label className="block text-xs font-semibold text-gray-700 mb-1">
+            YouTube account
+          </label>
+
+          {youtubeStatusLoading ? (
+            <p className="text-xs text-gray-500 py-1">Checking...</p>
+          ) : youtubeConnected ? (
+            <div className="flex items-center gap-2 px-3 py-2 rounded-lg bg-green-50 border border-green-200">
+              <CheckCircle className="w-4 h-4 text-green-600 shrink-0" />
+              <span className="text-sm font-medium text-green-800">YouTube account connected</span>
+            </div>
+          ) : null}
+
+          <div className="flex flex-col gap-2 mt-2">
+            {/* Optional manual token entry (fallback) */}
+            <input
+              type="password"
+              value={config.youtubeOAuthToken}
+              onChange={(e) => setConfig({ youtubeOAuthToken: e.target.value })}
+              disabled={isActive}
+              placeholder="Optional: paste token JSON (advanced)"
+              className="w-full px-3 py-2 text-sm border-2 border-gray-200 rounded-lg focus:border-primary-600 focus:outline-none disabled:opacity-50"
+            />
+
+            {/* Connect button – show when not connected or as "Reconnect" */}
+            <button
+              type="button"
+              disabled={isActive}
+              onClick={() => {
+                window.location.href = 'http://localhost:8000/auth/youtube/start'
+              }}
+              className="w-full px-3 py-2 text-xs font-semibold border-2 border-primary-600 text-primary-700 rounded-lg hover:bg-primary-50 disabled:opacity-50"
+            >
+              {youtubeConnected ? 'Reconnect YouTube account' : 'Connect your YouTube account'}
+            </button>
+
+            {!youtubeConnected && (
+              <p className="text-[11px] text-gray-500">
+                Click once to authorize StreamBuddy. Then you can start YouTube sessions without pasting a token.
+              </p>
+            )}
+          </div>
         </div>
       )}
       
