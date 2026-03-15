@@ -39,21 +39,3 @@ spec:
             cpu: '2'
             # 4 GB memory for video/audio buffering
             memory: 4Gi
-        # Liveness probe - checks if container is alive
-        livenessProbe:
-          httpGet:
-            path: /health
-            port: 8080
-          initialDelaySeconds: 10
-          periodSeconds: 30
-          timeoutSeconds: 3
-          failureThreshold: 3
-        # Readiness probe - checks if container is ready to serve
-        startupProbe:
-          httpGet:
-            path: /ready
-            port: 8080
-          initialDelaySeconds: 5
-          periodSeconds: 10
-          timeoutSeconds: 3
-          failureThreshold: 3

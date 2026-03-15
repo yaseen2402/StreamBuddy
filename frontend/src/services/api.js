@@ -1,8 +1,13 @@
 import axios from 'axios'
 import { getClientSessionId } from '../utils/sessionId'
 
+// Use VITE_BACKEND_URL from environment, fallback to relative /api
+const baseURL = import.meta.env.VITE_BACKEND_URL 
+  ? `${import.meta.env.VITE_BACKEND_URL}/api`
+  : '/api'
+
 const api = axios.create({
-  baseURL: '/api',
+  baseURL,
   headers: {
     'Content-Type': 'application/json',
   },
@@ -52,10 +57,8 @@ export const streamBuddyAPI = {
   // Get YouTube OAuth URL
   getYouTubeAuthUrl: () => {
     const sessionId = getClientSessionId()
-    const backendHost = import.meta.env.VITE_BACKEND_HOST || window.location.hostname
-    const backendPort = import.meta.env.VITE_BACKEND_PORT || '8000'
-    const protocol = window.location.protocol
-    return `${protocol}//${backendHost}:${backendPort}/auth/youtube/start?client_session_id=${sessionId}`
+    const backendUrl = import.meta.env.VITE_BACKEND_URL || window.location.origin
+    return `${backendUrl}/auth/youtube/start?client_session_id=${sessionId}`
   },
 }
 

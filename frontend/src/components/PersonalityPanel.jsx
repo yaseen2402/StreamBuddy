@@ -46,13 +46,17 @@ const PersonalityPanel = () => {
         <span>Personality</span>
       </h2>
       
+      <p className="text-xs text-gray-600 mb-4 pb-3 border-b border-gray-200">
+        Configure how the AI responds to live chat
+      </p>
+      
       <div className="space-y-4">
         {/* Sliders */}
         <SliderControl label="Humor" value={personality.humor_level} onChange={(value) => setPersonality({ humor_level: value })} />
         <SliderControl label="Support" value={personality.supportiveness} onChange={(value) => setPersonality({ supportiveness: value })} />
         <SliderControl label="Playful" value={personality.playfulness} onChange={(value) => setPersonality({ playfulness: value })} />
         
-        {/* Dropdowns */}
+        {/* Verbosity Dropdown */}
         <div>
           <label className="block text-xs font-semibold text-gray-700 mb-1">Style</label>
           <select
@@ -63,19 +67,6 @@ const PersonalityPanel = () => {
             <option value="concise">Brief</option>
             <option value="moderate">Natural</option>
             <option value="verbose">Detailed</option>
-          </select>
-        </div>
-        
-        <div>
-          <label className="block text-xs font-semibold text-gray-700 mb-1">Frequency</label>
-          <select
-            value={personality.response_frequency}
-            onChange={(e) => setPersonality({ response_frequency: e.target.value })}
-            className="w-full px-3 py-2 text-sm border-2 border-gray-200 rounded-lg focus:border-primary-600 focus:outline-none"
-          >
-            <option value="low">Selective</option>
-            <option value="medium">Balanced</option>
-            <option value="high">Active</option>
           </select>
         </div>
         

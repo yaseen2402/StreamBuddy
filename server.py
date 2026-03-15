@@ -33,7 +33,6 @@ from google.genai import types
 
 # StreamBuddy components
 from streambuddy_agent.screen_capture import ScreenCapture, ScreenConfig
-from streambuddy_agent.video_capture import VideoCapture, VideoConfig
 from streambuddy_agent.audio_capture import AudioCapture, AudioConfig
 from streambuddy_agent.youtube_connection import YouTubeConnection
 from streambuddy_agent.chat_capture import ChatCapture, ChatConfig
@@ -96,7 +95,6 @@ class ADKStreamBuddySession:
         
         # Capture components
         self.screen_capture: Optional[ScreenCapture] = None
-        self.video_capture: Optional[VideoCapture] = None
         self.audio_capture: Optional[AudioCapture] = None
         self.youtube_connection: Optional[YouTubeConnection] = None
         self.chat_capture: Optional[ChatCapture] = None
@@ -156,6 +154,15 @@ class ADKStreamBuddySession:
         # 45 seconds → at most ~1–2 decision calls per minute.
         self.min_voice_interval_sec: float = 45.0
         
+        # Personality configuration
+        self.personality: Dict[str, Any] = {
+            "humor_level": 0.7,
+            "supportiveness": 0.8,
+            "playfulness": 0.6,
+            "verbosity": "moderate",
+            "response_frequency": "medium",
+        }
+        
         # Persistent session logging (captions + conversation) on disk
         self.session_log_dir: Optional[Path] = None
         self.caption_log_path: Optional[Path] = None
@@ -176,6 +183,11 @@ class ADKStreamBuddySession:
         self.session_id = f"adk_session_{int(datetime.now().timestamp())}"
         self.start_time = datetime.now()
         youtube_connection_error = None
+        
+        # Update personality if provided
+        if config.personality:
+            self.personality.update(config.personality)
+            logger.info(f"Personality configured: {self.personality}")
 
         # Create a directory for this session's persistent logs
         try:
@@ -705,11 +717,33 @@ You are StreamBuddy, a casual and friendly AI co-host for live streaming. You sp
             return
 
         try:
+            # Build personality-aware prompt
+            humor = self.personality.get("humor_level", 0.7)
+            support = self.personality.get("supportiveness", 0.8)
+            playful = self.personality.get("playfulness", 0.6)
+            verbosity = self.personality.get("verbosity", "moderate")
+            
+            # Adjust response style based on personality
+            style_hints = []
+            if humor > 0.7:
+                style_hints.append("be witty and humorous")
+            if support > 0.7:
+                style_hints.append("be encouraging and supportive")
+            if playful > 0.7:
+                style_hints.append("be playful and energetic")
+            
+            length_hint = {
+                "concise": "Keep it very brief (1 sentence)",
+                "moderate": "Keep it short and conversational (2-3 sentences)",
+                "verbose": "You can elaborate a bit (3-4 sentences)"
+            }.get(verbosity, "Keep it short and conversational")
+            
+            style_text = ", ".join(style_hints) if style_hints else "be natural and friendly"
+            
             text_turn = (
                 f"Viewer {message.username} says: {message.content}\n\n"
-                "As StreamBuddy, respond out loud only if this message "
-                "is interesting, emotional, funny, or clearly calling for a reply. "
-                "Keep your response short and conversational."
+                f"As StreamBuddy, respond out loud if this message is interesting, emotional, funny, or needs a reply. "
+                f"{length_hint}. Your style: {style_text}."
             )
 
             await self.live_session.send_client_content(
@@ -1046,9 +1080,6 @@ You are StreamBuddy, a casual and friendly AI co-host for live streaming. You sp
         if self.screen_capture:
             self.screen_capture.stop_capture()
             self.status["video_capturing"] = False
-        if self.video_capture:
-            self.video_capture.stop_capture()
-            self.status["video_capturing"] = False
         if self.audio_capture:
             self.audio_capture.stop_capture()
             self.status["audio_capturing"] = False
@@ -1281,6 +1312,39 @@ async def stop_session():
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         logger.error(f"Failed to stop session: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/personality/update")
+async def update_personality(request: UpdatePersonalityRequest):
+    """Update personality settings during active session"""
+    try:
+        if not session_manager.is_active:
+            raise HTTPException(status_code=400, detail="No active session")
+        
+        # Update personality settings
+        updates = {}
+        if request.humor_level is not None:
+            updates["humor_level"] = request.humor_level
+        if request.supportiveness is not None:
+            updates["supportiveness"] = request.supportiveness
+        if request.playfulness is not None:
+            updates["playfulness"] = request.playfulness
+        if request.verbosity is not None:
+            updates["verbosity"] = request.verbosity
+        if request.response_frequency is not None:
+            updates["response_frequency"] = request.response_frequency
+        
+        session_manager.personality.update(updates)
+        logger.info(f"Personality updated: {updates}")
+        
+        return {
+            "success": True,
+            "personality": session_manager.personality
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to update personality: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.websocket("/ws")

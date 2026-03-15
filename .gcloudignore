@@ -1,0 +1,47 @@
+# This file specifies files that are *not* uploaded to Google Cloud
+# using gcloud. It follows the same syntax as .gitignore
+
+.gcloudignore
+.git
+.gitignore
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+ENV/
+env/
+.venv
+
+# Frontend
+frontend/
+node_modules/
+
+# Session data
+streambuddy_sessions/
+youtube_tokens/
+
+# Static files
+static/
+
+# IDE
+.vscode/
+.idea/
+.kiro/
+
+# Testing
+.pytest_cache/
+*.log
+
+# Docs
+*.md
+!README.md
+
+# Config files not needed in container
+cloudrun-service.yaml
+setup-remote.sh
+.dockerignore
+env.yaml

@@ -202,11 +202,11 @@ const useWebSocket = () => {
     // Enable reconnection when explicitly connecting
     shouldReconnectRef.current = true
     
-    // Use environment variable for backend URL, fallback to current host
-    const backendHost = import.meta.env.VITE_BACKEND_HOST || window.location.hostname
-    const backendPort = import.meta.env.VITE_BACKEND_PORT || '8000'
-    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
-    const wsUrl = `${protocol}//${backendHost}:${backendPort}/ws`
+    // Use VITE_BACKEND_URL from environment
+    const backendUrl = import.meta.env.VITE_BACKEND_URL || window.location.origin
+    const wsProtocol = backendUrl.startsWith('https') ? 'wss:' : 'ws:'
+    const wsHost = backendUrl.replace(/^https?:\/\//, '')
+    const wsUrl = `${wsProtocol}//${wsHost}/ws`
     
     console.log(`Connecting to WebSocket: ${wsUrl}`)
     

@@ -39,6 +39,8 @@ COPY --from=builder /root/.local /root/.local
 
 # Copy application code
 COPY streambuddy_agent/ ./streambuddy_agent/
+COPY server.py .
+COPY client_secret.json* ./
 
 # Make sure scripts in .local are usable
 ENV PATH=/root/.local/bin:$PATH
@@ -46,12 +48,11 @@ ENV PATH=/root/.local/bin:$PATH
 # Set Python to run in unbuffered mode for real-time logging
 ENV PYTHONUNBUFFERED=1
 
+# Environment variables will be set at deploy time via env.yaml
+ENV PORT=8080
+
 # Expose port for Cloud Run (default 8080)
 EXPOSE 8080
 
-# Health check endpoint (will be implemented in app.py)
-HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
-    CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8080/health').read()"
-
-# Run the application
-CMD ["python", "backend_server.py"]
+# Run the application with proper host binding
+CMD uvicorn server:app --host 0.0.0.0 --port ${PORT:-8080}
