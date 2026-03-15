@@ -3,6 +3,7 @@
 *.env
 .env.local
 .env.*.local
+env.yaml
 client_secret.json
 youtube_token.json
 youtube_tokens/
