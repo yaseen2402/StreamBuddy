@@ -46,6 +46,12 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# Configuration
+REMOTE_AUDIO_MODE = os.getenv("REMOTE_AUDIO_MODE", "true").lower() == "true"
+PROACTIVE_AUDIO_MODE = os.getenv("PROACTIVE_AUDIO_MODE", "false").lower() == "true"
+logger.info(f"Remote audio mode: {REMOTE_AUDIO_MODE}")
+logger.info(f"Proactive audio mode: {PROACTIVE_AUDIO_MODE}")
+
 # ============================================================================
 # Pydantic Models for API
 # ============================================================================
@@ -200,22 +206,27 @@ class ADKStreamBuddySession:
         # Uses default API version for gemini-2.5-flash.
         self.caption_client = genai.Client(api_key=api_key)
         
-        # Initialize audio output
-        from streambuddy_agent.audio_output import AudioOutputService, MixerConfig, QueueConfig
-        
-        mixer_config = MixerConfig(sample_rate=24000, channels=1, chunk_size=1024)
-        queue_config = QueueConfig(max_queue_size=5, drop_policy="oldest")
-        self.audio_output = AudioOutputService(
-            mixer_config=mixer_config,
-            queue_config=queue_config
-        )
-        
-        success = await self.audio_output.start()
-        if success:
-            logger.info("✓ Audio output started")
-            await self.broadcast_status("Audio output ready")
+        # Initialize audio output (optional in remote mode)
+        # In remote mode, audio is sent to frontend via WebSocket
+        if not REMOTE_AUDIO_MODE:
+            from streambuddy_agent.audio_output import AudioOutputService, MixerConfig, QueueConfig
+            
+            mixer_config = MixerConfig(sample_rate=24000, channels=1, chunk_size=1024)
+            queue_config = QueueConfig(max_queue_size=5, drop_policy="oldest")
+            self.audio_output = AudioOutputService(
+                mixer_config=mixer_config,
+                queue_config=queue_config
+            )
+            
+            success = await self.audio_output.start()
+            if success:
+                logger.info("✓ Local audio output started")
+                await self.broadcast_status("Local audio output ready")
+            else:
+                logger.warning("⚠ Local audio output failed to start")
         else:
-            logger.warning("⚠ Audio output failed to start")
+            logger.info("Remote audio mode: audio will be sent to frontend via WebSocket")
+            self.audio_output = None
         
         # Start video capture based on mode
         if config.mode == "local":
@@ -314,33 +325,41 @@ class ADKStreamBuddySession:
                     logger.error("✗ Failed to start YouTube chat capture")
                     await self.broadcast_status("YouTube chat capture failed", "error")
         
-        # Start audio capture
-        audio_config = AudioConfig(
-            sample_rate=16000,
-            channels=1,
-            chunk_duration_ms=100,  # 100ms chunks for low latency
-            buffer_size=50
-        )
-        self.audio_capture = AudioCapture(
-            config=audio_config,
-            forward_callback=self._forward_audio
-        )
-        
-        if self.audio_capture.start_capture():
-            self.status["audio_capturing"] = True
-            logger.info("✓ Audio capture started")
-            await self.broadcast_status("Audio capture started")
+        # Start audio capture (only if not in remote mode)
+        # In remote mode, audio comes from frontend via WebSocket
+        if not REMOTE_AUDIO_MODE:
+            audio_config = AudioConfig(
+                sample_rate=16000,
+                channels=1,
+                chunk_duration_ms=100,  # 100ms chunks for low latency
+                buffer_size=50
+            )
+            self.audio_capture = AudioCapture(
+                config=audio_config,
+                forward_callback=self._forward_audio
+            )
+            
+            if self.audio_capture.start_capture():
+                self.status["audio_capturing"] = True
+                logger.info("✓ Local audio capture started")
+                await self.broadcast_status("Local audio capture started")
+        else:
+            logger.info("Remote audio mode: audio will come from frontend via WebSocket")
+            await self.broadcast_status("Waiting for frontend audio connection")
         
         self.is_active = True
         
         # Start ADK streaming task
         self.stream_task = asyncio.create_task(self._run_adk_stream())
         
-        # Start proactive commentary loop in background
-        # This periodically nudges the model to react to recent context,
-        # so the agent doesn't go silent after the first response.
-        if self.commentary_task is None or self.commentary_task.done():
-            self.commentary_task = asyncio.create_task(self._proactive_commentary_loop())
+        # Start proactive commentary loop only if proactive mode is enabled
+        # This periodically nudges the model to react to recent context
+        if PROACTIVE_AUDIO_MODE:
+            if self.commentary_task is None or self.commentary_task.done():
+                self.commentary_task = asyncio.create_task(self._proactive_commentary_loop())
+                logger.info("Proactive commentary loop enabled")
+        else:
+            logger.info("Proactive commentary loop disabled (responsive mode)")
         
         logger.info("✓ ADK streaming started")
         await self.broadcast_status("StreamBuddy is now active!", "success")
@@ -363,8 +382,9 @@ class ADKStreamBuddySession:
             # System instruction for StreamBuddy personality
             # Following Google's best practices: https://docs.cloud.google.com/vertex-ai/generative-ai/docs/live-api/best-practices
             # Structure: Persona → Conversational Rules → Guardrails
-            # With Proactive Audio enabled, the model can initiate responses based on context
-            system_instruction = """**Persona:**
+            if PROACTIVE_AUDIO_MODE:
+                # Proactive mode: AI decides when to speak
+                system_instruction = """**Persona:**
 You are StreamBuddy, a casual and friendly AI co-host for live streaming. You speak naturally and conversationally, like a real person hanging out with friends.
 
 **Conversational Rules:**
@@ -380,6 +400,21 @@ You are StreamBuddy, a casual and friendly AI co-host for live streaming. You sp
    - Background noise or irrelevant audio
 
 4. **Be spontaneous but accurate:** Use natural reactions and talk like you're genuinely watching with the streamer. Don't narrate everything - avoid making up details that you can't clearly observe.
+"""
+            else:
+                # Responsive mode: AI responds to all user input quickly
+                system_instruction = """**Persona:**
+You are StreamBuddy, a casual and friendly AI co-host for live streaming. You speak naturally and conversationally, like a real person hanging out with friends.
+
+**Conversational Rules:**
+
+1. **Respond quickly:** When the user speaks to you, respond immediately in a natural, conversational way.
+
+2. **Be concise:** Keep responses brief and to the point (2-3 sentences max) for natural conversation flow.
+
+3. **Be engaging:** Show enthusiasm and interest in what the user is saying or doing.
+
+4. **Stay natural:** Talk like a friend, not a robot. Use casual language and natural reactions.
 """
             
             # Configure streaming with proactive audio
@@ -397,13 +432,16 @@ You are StreamBuddy, a casual and friendly AI co-host for live streaming. You sp
                 )
             )
             
-            # Enable proactive audio (requires v1alpha API version)
-            # Proactive audio allows the model to initiate responses
-            # based on context without explicit user prompts
-            config.proactivity = types.ProactivityConfig(
-                proactive_audio=True
-            )
-            logger.info("Proactive audio enabled")
+            # Enable proactive audio only if configured
+            # Proactive audio: AI decides when to speak (adds latency but more natural for streaming)
+            # Responsive mode: AI responds to all input immediately (lower latency)
+            if PROACTIVE_AUDIO_MODE:
+                config.proactivity = types.ProactivityConfig(
+                    proactive_audio=True
+                )
+                logger.info("Proactive audio enabled (AI decides when to speak)")
+            else:
+                logger.info("Responsive mode enabled (AI responds to all input)")
             
             # Start bidirectional streaming using raw Live API
             async with self.client.aio.live.connect(
@@ -417,11 +455,9 @@ You are StreamBuddy, a casual and friendly AI co-host for live streaming. You sp
                 # Store session for sending
                 self.live_session = session
                 
-                # Optional: Send a greeting prompt to have the AI initiate conversation
-                # Per best practices: "To have Gemini Live API initiate the conversation, 
-                # include a prompt asking it to greet the user or begin the conversation."
+                # Send initial greeting to start conversation
                 try:
-                    greeting_prompt = "Hey StreamBuddy! Say hi and let me know you're ready to co-host."
+                    greeting_prompt = "Say a brief friendly greeting to let me know you're ready."
                     await session.send_client_content(
                         turns=types.Content(
                             role="user",
@@ -434,16 +470,19 @@ You are StreamBuddy, a casual and friendly AI co-host for live streaming. You sp
                     logger.warning(f"Failed to send greeting prompt: {e}")
                 
                 # Receive and process responses continuously
-                # We buffer audio chunks for each model turn so that
-                # a single spoken response is played back smoothly,
-                # instead of many tiny, clipped fragments.
+                # Buffer audio chunks for each model turn for smooth playback
                 current_audio_buffer = bytearray()
+                last_activity_time = time.time()
+                
                 while self.is_active:
                     try:
                         async for response in session.receive():
                             if not self.is_active:
                                 logger.info("Session marked inactive, stopping receive loop")
                                 break
+                            
+                            # Update activity timestamp
+                            last_activity_time = time.time()
                             
                             # Handle server content
                             if hasattr(response, "server_content") and response.server_content:
@@ -475,31 +514,72 @@ You are StreamBuddy, a casual and friendly AI co-host for live streaming. You sp
                                         merged = bytes(current_audio_buffer)
                                         self.status["responses_generated"] += 1
                                         logger.info(
-                                            f"Playing merged audio response: {len(merged)} bytes "
-                                            f"(chunks_in_turn={len(current_audio_buffer)})"
+                                            f"Playing audio response: {len(merged)} bytes"
                                         )
                                         await self._play_audio_response(merged)
                                         await self.broadcast_status("AI responded", "info")
                                         current_audio_buffer.clear()
+                                        
+                                        # Update activity timestamp after successful response
+                                        last_activity_time = time.time()
+                        
+                        # Check for timeout (no activity for 60 seconds)
+                        if time.time() - last_activity_time > 60:
+                            logger.warning("No activity for 60 seconds, connection may be stale")
+                            break
                         
                         # After each turn completes, continue to next turn if still active
                         if not self.is_active:
                             break
-                        
-                        logger.debug("Turn completed, waiting for next turn")
-                        await asyncio.sleep(0.1)  # Small delay before next receive
                     
+                    except asyncio.CancelledError:
+                        logger.info("Receive loop cancelled")
+                        break
                     except Exception as e:
-                        logger.error(f"Error in receive loop: {e}", exc_info=True)
+                        # Check if it's a connection closure error
+                        error_str = str(e)
+                        error_type = str(type(e).__name__)
+                        
+                        if "ConnectionClosedError" in error_type or "1006" in error_str or "no close frame" in error_str:
+                            logger.warning(f"Gemini connection closed: {error_str[:100]}")
+                            await self.broadcast_status("Connection lost, reconnecting...", "warning")
+                            # Break out of receive loop to trigger reconnection
+                            break
+                        else:
+                            logger.error(f"Error in receive loop: {e}", exc_info=True)
+                            # Don't break on other errors, try to continue
+                            await asyncio.sleep(0.5)
                 
                 logger.info("Exited receive loop")
         
+        except asyncio.CancelledError:
+            logger.info("Live API stream cancelled")
         except Exception as e:
-            logger.error(f"Error in Live API stream: {e}", exc_info=True)
-            await self.broadcast_status(f"Stream error: {e}", "error")
+            error_msg = str(e)
+            error_type = str(type(e).__name__)
+            
+            if "ConnectionClosedError" in error_type or "1006" in error_msg or "no close frame" in error_msg:
+                logger.info(f"Gemini connection closed, will reconnect")
+                await self.broadcast_status("Reconnecting to Gemini...", "info")
+            else:
+                logger.error(f"Error in Live API stream: {e}", exc_info=True)
+                await self.broadcast_status(f"Stream error: {error_msg[:100]}", "error")
         finally:
             self.status["gemini_connected"] = False
+            self.live_session = None
             logger.info("Live API stream ended")
+            
+            # Attempt reconnection if session is still active
+            if self.is_active:
+                logger.info("Session still active, reconnecting in 2 seconds...")
+                await self.broadcast_status("Reconnecting to Gemini...", "info")
+                await asyncio.sleep(2)
+                if self.is_active:
+                    logger.info("Restarting Live API stream...")
+                    # Restart the streaming task
+                    self.stream_task = asyncio.create_task(self._run_adk_stream())
+    
+    
     
 
     def _forward_video(self, frame):
@@ -756,27 +836,40 @@ You are StreamBuddy, a casual and friendly AI co-host for live streaming. You sp
             logger.error(f"Chat analysis loop crashed: {e}", exc_info=True)
     
     async def _play_audio_response(self, audio_bytes: bytes):
-        """Play audio response through audio output service"""
+        """Play audio response through audio output service and broadcast to WebSocket clients"""
         try:
-            if not self.audio_output:
-                logger.warning("No audio output service available")
-                return
+            # Broadcast audio to all connected WebSocket clients (frontend)
+            if self.websocket_connections:
+                disconnected = []
+                for ws in self.websocket_connections:
+                    try:
+                        await ws.send_bytes(audio_bytes)
+                        logger.debug(f"Sent {len(audio_bytes)} bytes to WebSocket client")
+                    except Exception as e:
+                        logger.warning(f"Failed to send audio to WebSocket client: {e}")
+                        disconnected.append(ws)
+                
+                # Clean up disconnected clients
+                for ws in disconnected:
+                    if ws in self.websocket_connections:
+                        self.websocket_connections.remove(ws)
             
-            # Create AudioData object for audio output
-            from streambuddy_agent.models import AudioData
-            import time
-            
-            audio_data = AudioData(
-                timestamp=time.time(),
-                audio_bytes=audio_bytes,
-                sample_rate=24000,  # Gemini outputs 24kHz
-                encoding="pcm",
-                duration_ms=int((len(audio_bytes) / (24000 * 2)) * 1000)  # 2 bytes per sample
-            )
-            
-            # Play through audio output service
-            await self.audio_output.play_audio(audio_data)
-            logger.debug(f"Playing audio: {len(audio_bytes)} bytes")
+            # Also play locally if audio output service is available (for local testing)
+            if self.audio_output:
+                from streambuddy_agent.models import AudioData
+                import time
+                
+                audio_data = AudioData(
+                    timestamp=time.time(),
+                    audio_bytes=audio_bytes,
+                    sample_rate=24000,  # Gemini outputs 24kHz
+                    encoding="pcm",
+                    duration_ms=int((len(audio_bytes) / (24000 * 2)) * 1000)  # 2 bytes per sample
+                )
+                
+                # Play through audio output service
+                await self.audio_output.play_audio(audio_data)
+                logger.debug(f"Playing audio locally: {len(audio_bytes)} bytes")
         
         except Exception as e:
             logger.error(f"Error playing audio: {e}")
@@ -1178,19 +1271,66 @@ async def stop_session():
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
-    """WebSocket endpoint for real-time updates"""
+    """WebSocket endpoint for real-time updates and audio streaming"""
     await websocket.accept()
     session_manager.websocket_connections.append(websocket)
     logger.info("WebSocket client connected")
     
     try:
         while True:
-            # Keep connection alive
-            data = await websocket.receive_text()
-            # Echo back for now
-            await websocket.send_json({"type": "pong"})
+            try:
+                # Receive data from client (can be text or binary)
+                message = await websocket.receive()
+                
+                # Check if it's a disconnect message
+                if message.get("type") == "websocket.disconnect":
+                    logger.info("WebSocket disconnect message received")
+                    break
+                
+                # Handle binary audio data from frontend microphone
+                if "bytes" in message:
+                    audio_bytes = message["bytes"]
+                    # Forward audio to Gemini Live session
+                    if session_manager.is_active and session_manager.live_session:
+                        try:
+                            await session_manager.live_session.send_realtime_input(
+                                audio=types.Blob(
+                                    data=audio_bytes,
+                                    mime_type="audio/pcm;rate=16000"
+                                )
+                            )
+                            logger.debug(f"Forwarded {len(audio_bytes)} bytes of audio from frontend")
+                        except asyncio.CancelledError:
+                            raise
+                        except Exception as e:
+                            error_msg = str(e)
+                            if "ConnectionClosedError" in str(type(e).__name__) or "1006" in error_msg or "no close frame" in error_msg:
+                                logger.debug(f"Gemini connection closed while forwarding audio (will reconnect)")
+                                # Don't spam warnings - reconnection is automatic
+                            else:
+                                logger.error(f"Error forwarding frontend audio: {e}")
+                    else:
+                        logger.debug("Received audio but session not active or not connected")
+                
+                # Handle text messages (control messages)
+                elif "text" in message:
+                    data = json.loads(message["text"])
+                    if data.get("type") == "ping":
+                        await websocket.send_json({"type": "pong"})
+            
+            except RuntimeError as e:
+                # Handle "Cannot call receive once disconnect received" error
+                if "disconnect" in str(e).lower():
+                    logger.info("WebSocket disconnected")
+                    break
+                else:
+                    raise
+
+                    
     except WebSocketDisconnect:
         logger.info("WebSocket client disconnected")
+    except Exception as e:
+        logger.error(f"WebSocket error: {e}", exc_info=True)
     finally:
         if websocket in session_manager.websocket_connections:
             session_manager.websocket_connections.remove(websocket)

@@ -43,6 +43,8 @@ StreamBuddy is a real-time AI companion for live streamers that provides natural
    python -m venv venv
    source venv/bin/activate  # On Windows: venv\Scripts\activate
    ```
+venv\Scripts\activate
+python server.py
 
 3. **Install dependencies**
    ```bash

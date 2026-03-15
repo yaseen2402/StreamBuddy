@@ -33,7 +33,7 @@ class ConnectionState(Enum):
 @dataclass
 class RetryConfig:
     """Configuration for exponential backoff retry logic"""
-    max_attempts: int = 5
+    max_attempts: int = 2
     base_delay: float = 1.0  # seconds
     max_delay: float = 16.0  # seconds
     
