@@ -61,6 +61,7 @@ class StartSessionRequest(BaseModel):
     video_source: Optional[str] = "0"
     youtube_oauth_token: Optional[str] = None
     personality: Optional[Dict[str, Any]] = None
+    client_session_id: Optional[str] = None  # Client-provided session ID for multi-user support
 
 class UpdatePersonalityRequest(BaseModel):
     humor_level: Optional[float] = None
@@ -78,6 +79,7 @@ class ADKStreamBuddySession:
     
     def __init__(self):
         self.session_id: Optional[str] = None
+        self.client_session_id: Optional[str] = None  # Client's persistent session ID
         self.mode: Optional[str] = None
         self.is_active = False
         self.start_time: Optional[datetime] = None
@@ -170,6 +172,7 @@ class ADKStreamBuddySession:
         self.main_loop = asyncio.get_running_loop()
         
         self.mode = config.mode
+        self.client_session_id = config.client_session_id or f"guest_{int(datetime.now().timestamp())}"
         self.session_id = f"adk_session_{int(datetime.now().timestamp())}"
         self.start_time = datetime.now()
         youtube_connection_error = None
@@ -178,7 +181,8 @@ class ADKStreamBuddySession:
         try:
             base_log_dir = Path("streambuddy_sessions")
             base_log_dir.mkdir(parents=True, exist_ok=True)
-            self.session_log_dir = base_log_dir / self.session_id
+            # Use client_session_id for organizing user sessions
+            self.session_log_dir = base_log_dir / self.client_session_id / self.session_id
             self.session_log_dir.mkdir(parents=True, exist_ok=True)
             self.caption_log_path = self.session_log_dir / "captions.jsonl"
             self.conversation_log_path = self.session_log_dir / "conversation.jsonl"
@@ -257,16 +261,19 @@ class ADKStreamBuddySession:
         elif config.mode == "youtube":
             # YouTube mode: live chat capture (no video) from the creator's channel.
             # Prefer an explicit token from the request; otherwise fall back to a
-            # locally stored token file written by the OAuth callback.
+            # session-specific token file.
             youtube_token = config.youtube_oauth_token
             if not youtube_token:
-                token_path = Path("youtube_token.json")
+                # Use session-specific token only
+                token_dir = Path("youtube_tokens")
+                token_path = token_dir / f"{self.client_session_id}.json"
+                
                 if token_path.exists():
                     try:
                         youtube_token = token_path.read_text(encoding="utf-8")
-                        logger.info("Loaded YouTube OAuth token from youtube_token.json")
+                        logger.info(f"Loaded YouTube OAuth token from {token_path}")
                     except Exception as e:
-                        logger.error(f"Failed to read youtube_token.json: {e}")
+                        logger.error(f"Failed to read {token_path}: {e}")
 
             if not youtube_token:
                 raise ValueError(
@@ -1233,9 +1240,16 @@ async def get_status():
 
 
 @app.get("/api/youtube/status")
-async def get_youtube_status():
+async def get_youtube_status(client_session_id: Optional[str] = None):
     """Return whether a YouTube OAuth token is stored (account connected)."""
-    token_path = Path("youtube_token.json")
+    # Check session-specific token only
+    if client_session_id:
+        token_dir = Path("youtube_tokens")
+        token_path = token_dir / f"{client_session_id}.json"
+    else:
+        # No session ID provided, can't check status
+        return {"connected": False}
+    
     connected = False
     if token_path.exists():
         try:
@@ -1337,12 +1351,15 @@ async def websocket_endpoint(websocket: WebSocket):
 
 
 @app.get("/auth/youtube/start")
-async def youtube_oauth_start():
+async def youtube_oauth_start(client_session_id: Optional[str] = None):
     """
     Start YouTube OAuth flow.
     Redirects the user to Google's consent screen. Requires a client_secret.json file
     or YOUTUBE_OAUTH_CLIENT_SECRET_FILE path, and YOUTUBE_OAUTH_REDIRECT_URI must
     match the redirect URI configured in the Google Cloud Console.
+    
+    Args:
+        client_session_id: Optional session ID to associate the token with a specific user
     """
     try:
         from google_auth_oauthlib.flow import Flow
@@ -1372,11 +1389,11 @@ async def youtube_oauth_start():
 
     auth_url, state = flow.authorization_url(
         access_type="offline",
-        include_granted_scopes="true",
+        include_granted_scopes="false",  # Don't include extra scopes
         prompt="consent",
+        state=client_session_id or "default",  # Pass session ID via state parameter
     )
 
-    # For this minimal flow we do not persist state; single-user dev is fine.
     return RedirectResponse(auth_url)
 
 
@@ -1417,6 +1434,9 @@ async def youtube_oauth_callback(request: Request):
         scopes=YOUTUBE_OAUTH_SCOPES,
         redirect_uri=YOUTUBE_OAUTH_REDIRECT_URI,
     )
+    
+    # Disable strict scope validation - Google adds openid/profile/email automatically
+    flow.oauth2session._client.scope = None
 
     # Use the same redirect_uri as in the auth request (localhost vs 127.0.0.1 must
     # match), and keep only the query string from the incoming request.
@@ -1429,7 +1449,7 @@ async def youtube_oauth_callback(request: Request):
         flow.fetch_token(authorization_response=authorization_response)
     except Exception as e:
         logger.error(f"Failed to fetch YouTube OAuth token: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail="Failed to fetch OAuth tokens")
+        raise HTTPException(status_code=500, detail=f"Failed to fetch OAuth tokens: {str(e)}")
 
     credentials = flow.credentials
 
@@ -1444,8 +1464,19 @@ async def youtube_oauth_callback(request: Request):
 
     # Persist token payload locally for development so YouTube mode can use it
     # automatically without copy/paste.
+    # Save with session ID if provided via state parameter
     try:
-        token_path = Path("youtube_token.json")
+        client_session_id = request.query_params.get("state", "default")
+        
+        # Create youtube_tokens directory if it doesn't exist
+        token_dir = Path("youtube_tokens")
+        token_dir.mkdir(exist_ok=True)
+        
+        if client_session_id and client_session_id != "default":
+            token_path = token_dir / f"{client_session_id}.json"
+        else:
+            token_path = token_dir / "default.json"
+        
         token_path.write_text(json.dumps(token_payload, indent=2), encoding="utf-8")
         logger.info(f"YouTube OAuth tokens saved to {token_path}")
     except Exception as e:

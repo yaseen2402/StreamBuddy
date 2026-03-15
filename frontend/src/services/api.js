@@ -1,4 +1,5 @@
 import axios from 'axios'
+import { getClientSessionId } from '../utils/sessionId'
 
 const api = axios.create({
   baseURL: '/api',
@@ -16,17 +17,22 @@ export const streamBuddyAPI = {
 
   // Check if YouTube account is connected (token stored on backend)
   getYouTubeStatus: async () => {
-    const response = await api.get('/youtube/status')
+    const sessionId = getClientSessionId()
+    const response = await api.get('/youtube/status', {
+      params: { client_session_id: sessionId }
+    })
     return response.data
   },
   
   // Start session
   startSession: async (config) => {
+    const sessionId = getClientSessionId()
     const response = await api.post('/session/start', {
       mode: config.mode,
       youtube_oauth_token: config.youtubeOAuthToken || null,
       video_source: config.videoSource,
       personality: config.personality,
+      client_session_id: sessionId,
     })
     return response.data
   },
@@ -41,6 +47,15 @@ export const streamBuddyAPI = {
   updatePersonality: async (personality) => {
     const response = await api.post('/personality/update', personality)
     return response.data
+  },
+  
+  // Get YouTube OAuth URL
+  getYouTubeAuthUrl: () => {
+    const sessionId = getClientSessionId()
+    const backendHost = import.meta.env.VITE_BACKEND_HOST || window.location.hostname
+    const backendPort = import.meta.env.VITE_BACKEND_PORT || '8000'
+    const protocol = window.location.protocol
+    return `${protocol}//${backendHost}:${backendPort}/auth/youtube/start?client_session_id=${sessionId}`
   },
 }
 

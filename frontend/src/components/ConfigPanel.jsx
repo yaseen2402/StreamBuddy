@@ -131,7 +131,8 @@ const ConfigPanel = () => {
               type="button"
               disabled={isActive}
               onClick={() => {
-                window.location.href = 'http://localhost:8000/auth/youtube/start'
+                const authUrl = streamBuddyAPI.getYouTubeAuthUrl()
+                window.location.href = authUrl
               }}
               className="w-full px-3 py-2 text-xs font-semibold border-2 border-primary-600 text-primary-700 rounded-lg hover:bg-primary-50 disabled:opacity-50"
             >

@@ -5,6 +5,7 @@
 .env.*.local
 client_secret.json
 youtube_token.json
+youtube_tokens/
 
 streambuddy_sessions/
 # Python
