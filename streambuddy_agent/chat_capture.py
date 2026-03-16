@@ -105,19 +105,28 @@ class ChatCapture:
                 return None
             
             # Get active live broadcasts
+            # Note: broadcastStatus and mine cannot be used together in the API
+            # Use broadcastType='all' with mine=True, then filter by status
             request = service.liveBroadcasts().list(
-                part='snippet',
-                broadcastStatus='active',
-                mine=True
+                part='snippet,status',
+                broadcastType='all',
+                mine=True,
+                maxResults=10
             )
             response = request.execute()
             
-            if not response.get('items'):
+            # Filter to only active broadcasts
+            items = [
+                item for item in response.get('items', [])
+                if item.get('status', {}).get('lifeCycleStatus') == 'live'
+            ]
+            
+            if not items:
                 logger.warning("No active live broadcasts found")
                 return None
             
             # Get the live chat ID from the first active broadcast
-            broadcast = response['items'][0]
+            broadcast = items[0]
             live_chat_id = broadcast['snippet'].get('liveChatId')
             
             if not live_chat_id:

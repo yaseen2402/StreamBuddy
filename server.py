@@ -148,6 +148,9 @@ class ADKStreamBuddySession:
         # Each entry: {"timestamp": float, "text": str}
         self.conversation_timeline: list[Dict[str, Any]] = []
         
+        # Track which chat message IDs have already been sent to the Live session
+        self._sent_message_ids: set[str] = set()
+        
         # Voice triggering controls
         self.last_voice_time: float = 0.0
         # Minimum spacing between voice triggers (seconds).
@@ -786,7 +789,11 @@ You are StreamBuddy, a casual and friendly AI co-host for live streaming. You sp
                     continue
 
                 # Snapshot recent messages to avoid mutation during analysis
-                recent_messages = list(self.chat_timeline[-50:])
+                # Only consider messages not already sent to the Live session
+                recent_messages = [
+                    m for m in self.chat_timeline[-50:]
+                    if m.message_id not in self._sent_message_ids
+                ]
                 if not recent_messages:
                     continue
 
@@ -838,7 +845,14 @@ You are StreamBuddy, a casual and friendly AI co-host for live streaming. You sp
                     continue
 
                 try:
-                    parsed = json.loads(raw_text)
+                    # Strip markdown code fences if model wraps response
+                    clean_text = raw_text.strip()
+                    if clean_text.startswith("```"):
+                        clean_text = clean_text.split("```")[1]
+                        if clean_text.startswith("json"):
+                            clean_text = clean_text[4:]
+                        clean_text = clean_text.strip()
+                    parsed = json.loads(clean_text)
                     selected_ids = parsed.get("selected_ids") or []
                     summary = parsed.get("summary") or ""
                     mood = parsed.get("mood") or ""
@@ -866,10 +880,14 @@ You are StreamBuddy, a casual and friendly AI co-host for live streaming. You sp
                             continue
                         try:
                             await self._send_chat_message_to_live(m)
+                            self._sent_message_ids.add(mid)
                         except Exception as e:
                             logger.error(
                                 f"Failed to send selected chat message {mid} to Live: {e}"
                             )
+                # Prune old sent IDs to avoid unbounded growth
+                if len(self._sent_message_ids) > 500:
+                    self._sent_message_ids = set(list(self._sent_message_ids)[-200:])
 
         except asyncio.CancelledError:
             logger.info("Chat analysis loop cancelled")
@@ -1225,9 +1243,15 @@ session_manager = ADKStreamBuddySession()
 app = FastAPI(title="StreamBuddy ADK API")
 
 # CORS middleware
+FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:3000")
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://localhost:3000"],
+    allow_origins=[
+        "http://localhost:5173",
+        "http://localhost:3000",
+        FRONTEND_URL,
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -1240,7 +1264,6 @@ YOUTUBE_OAUTH_CLIENT_SECRET_FILE = os.getenv(
 YOUTUBE_OAUTH_REDIRECT_URI = os.getenv(
     "YOUTUBE_OAUTH_REDIRECT_URI", "http://localhost:8000/auth/youtube/callback"
 )
-FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:3000")
 
 @app.get("/", response_class=HTMLResponse)
 async def root():
