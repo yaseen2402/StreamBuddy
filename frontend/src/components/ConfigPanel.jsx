@@ -49,6 +49,8 @@ const ConfigPanel = () => {
   
   const handleStart = async () => {
     setLoading(true)
+    // Clear any stale session data before starting new session
+    clearSession()
     addLogEntry('Starting StreamBuddy...', 'info')
     
     try {
