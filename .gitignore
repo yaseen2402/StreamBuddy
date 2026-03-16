@@ -7,7 +7,7 @@ env.yaml
 client_secret.json
 youtube_token.json
 youtube_tokens/
-
+.kiro/
 streambuddy_sessions/
 # Python
 __pycache__/
