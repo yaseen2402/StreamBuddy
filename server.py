@@ -1,11 +1,11 @@
 """
-StreamBuddy Backend Server - ADK Implementation
+StreamBuddy Backend Server - Google GenAI SDK Implementation
 
-Uses Google's Agent Development Kit (ADK) for robust real-time streaming:
-- Automatic tool execution
-- Transparent reconnection handling  
+Uses Google's GenAI SDK for robust real-time streaming:
+- Direct Gemini Live API integration
+- Real-time audio streaming
 - Session persistence
-- Typed events with LiveRequestQueue
+- WebSocket-based communication
 """
 
 import asyncio
@@ -27,7 +27,7 @@ from fastapi.responses import RedirectResponse, HTMLResponse
 from pydantic import BaseModel
 import uvicorn
 
-# ADK imports
+# Google GenAI SDK imports
 from google import genai
 from google.genai import types
 
@@ -70,11 +70,11 @@ class UpdatePersonalityRequest(BaseModel):
     response_frequency: Optional[str] = None
 
 # ============================================================================
-# ADK StreamBuddy Session Manager
+# StreamBuddy Session Manager
 # ============================================================================
 
-class ADKStreamBuddySession:
-    """Manages StreamBuddy session using ADK"""
+class StreamBuddySession:
+    """Manages StreamBuddy session using Google GenAI SDK"""
     
     def __init__(self):
         self.session_id: Optional[str] = None
@@ -86,7 +86,7 @@ class ADKStreamBuddySession:
         # Store the main event loop for thread-safe async calls
         self.main_loop: Optional[asyncio.AbstractEventLoop] = None
         
-        # ADK components
+        # Google GenAI SDK components
         self.client: Optional[genai.Client] = None
         self.live_session = None  # Live streaming session
         self.audio_output = None  # Audio output service
@@ -172,18 +172,18 @@ class ADKStreamBuddySession:
         self.conversation_log_path: Optional[Path] = None
     
     async def start(self, config: StartSessionRequest) -> Dict[str, Any]:
-        """Start ADK streaming session"""
+        """Start streaming session"""
         if self.is_active:
             raise ValueError("Session already active")
         
-        logger.info(f"Starting ADK session in {config.mode} mode")
+        logger.info(f"Starting session in {config.mode} mode")
         
         # Store the main event loop for thread-safe async calls
         self.main_loop = asyncio.get_running_loop()
         
         self.mode = config.mode
         self.client_session_id = config.client_session_id or f"guest_{int(datetime.now().timestamp())}"
-        self.session_id = f"adk_session_{int(datetime.now().timestamp())}"
+        self.session_id = f"session_{int(datetime.now().timestamp())}"
         self.start_time = datetime.now()
         youtube_connection_error = None
         
@@ -212,13 +212,13 @@ class ADKStreamBuddySession:
         
         logger.info(f"API key loaded: {api_key[:10]}...")
         
-        # Initialize ADK client with v1alpha API version
-        # v1alpha is required for proactive audio and affective dialog features
+        # Initialize Google GenAI SDK client with v1alpha API version
+        # v1alpha is required for Live API audio models
         self.client = genai.Client(
             api_key=api_key,
             http_options={'api_version': 'v1alpha'}
         )
-        logger.info("✓ ADK Client created (v1alpha API)")
+        logger.info("✓ GenAI SDK Client created (v1alpha API)")
         await self.broadcast_status("Client initialized")
         
         # Separate client for perception/captioning (standard Gemini API)
@@ -274,7 +274,7 @@ class ADKStreamBuddySession:
                 await self.broadcast_status("Screen capture failed", "error")
         
         elif config.mode == "youtube":
-            # YouTube mode: live chat capture (no video) from the creator's channel.
+            # YouTube mode: live chat capture from the creator's channel.
             # Prefer an explicit token from the request; otherwise fall back to a
             # session-specific token file.
             youtube_token = config.youtube_oauth_token
@@ -293,8 +293,7 @@ class ADKStreamBuddySession:
             if not youtube_token:
                 raise ValueError(
                     "YouTube OAuth token not available. "
-                    "Connect your YouTube account first via /auth/youtube/start "
-                    "or provide youtube_oauth_token in the request."
+                    "Connect your YouTube account"
                 )
 
             # Establish YouTube API connection
@@ -371,8 +370,8 @@ class ADKStreamBuddySession:
         
         self.is_active = True
         
-        # Start ADK streaming task
-        self.stream_task = asyncio.create_task(self._run_adk_stream())
+        # Start streaming task
+        self.stream_task = asyncio.create_task(self._run_live_stream())
         
         # Start proactive commentary loop only if proactive mode is enabled
         # This periodically nudges the model to react to recent context
@@ -383,7 +382,7 @@ class ADKStreamBuddySession:
         else:
             logger.info("Proactive commentary loop disabled (responsive mode)")
         
-        logger.info("✓ ADK streaming started")
+        logger.info("✓ Streaming started")
         await self.broadcast_status("StreamBuddy is now active!", "success")
 
         out = {
@@ -396,8 +395,8 @@ class ADKStreamBuddySession:
             out["youtube_connection_error"] = youtube_connection_error
         return out
     
-    async def _run_adk_stream(self):
-        """Main streaming loop using raw Live API (google.genai)"""
+    async def _run_live_stream(self):
+        """Main streaming loop using Gemini Live API (google.genai)"""
         try:
             logger.info("Starting Live API stream")
             
@@ -599,14 +598,14 @@ You are StreamBuddy, a casual and friendly AI co-host for live streaming. You sp
                 if self.is_active:
                     logger.info("Restarting Live API stream...")
                     # Restart the streaming task
-                    self.stream_task = asyncio.create_task(self._run_adk_stream())
+                    self.stream_task = asyncio.create_task(self._run_live_stream())
     
     
     
 
     def _forward_video(self, frame):
         """
-        Forward video frame to Gemini via ADK session.
+        Forward video frame to Gemini via Live session.
         
         Note: Audio+video sessions are limited to 2 minutes without compression.
         Context window compression extends this to unlimited duration.
@@ -648,12 +647,12 @@ You are StreamBuddy, a casual and friendly AI co-host for live streaming. You sp
                 logger.error(f"Error forwarding video: {e}")
     
     def _forward_audio(self, audio_data):
-        """Forward audio chunk to Gemini via ADK session"""
+        """Forward audio chunk to Gemini via Live session"""
         self.status["audio_chunks_captured"] += 1
         
         if hasattr(self, 'live_session') and self.live_session and self.is_active:
             try:
-                # Send audio using ADK session.send_realtime_input()
+                # Send audio using Live session.send_realtime_input()
                 # Schedule in the main event loop from thread
                 if hasattr(self, 'main_loop') and self.main_loop:
                     asyncio.run_coroutine_threadsafe(
@@ -1087,11 +1086,11 @@ You are StreamBuddy, a casual and friendly AI co-host for live streaming. You sp
             logger.error(f"Error in frame captioning pipeline: {e}", exc_info=True)
     
     async def stop(self) -> Dict[str, Any]:
-        """Stop the ADK session"""
+        """Stop the streaming session"""
         if not self.is_active:
             raise ValueError("No active session")
         
-        logger.info("Stopping ADK session")
+        logger.info("Stopping session")
         self.is_active = False
         
         # Stop capture
@@ -1234,13 +1233,13 @@ You are StreamBuddy, a casual and friendly AI co-host for live streaming. You sp
         }
 
 # Global session manager
-session_manager = ADKStreamBuddySession()
+session_manager = StreamBuddySession()
 
 # ============================================================================
 # FastAPI Application
 # ============================================================================
 
-app = FastAPI(title="StreamBuddy ADK API")
+app = FastAPI(title="StreamBuddy API")
 
 # CORS middleware
 FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:3000")
@@ -1579,7 +1578,7 @@ async def youtube_oauth_callback(request: Request):
 
 if __name__ == "__main__":
     logger.info("=" * 60)
-    logger.info("StreamBuddy ADK Server Starting")
+    logger.info("StreamBuddy Server Starting")
     logger.info("=" * 60)
     logger.info("Open your browser to: http://localhost:8000")
     logger.info("=" * 60)
