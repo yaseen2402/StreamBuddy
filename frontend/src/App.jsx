@@ -1,6 +1,7 @@
 import { useEffect } from 'react'
 import { Sliders, X } from 'lucide-react'
 import Header from './components/Header'
+import Footer from './components/Footer'
 import ModeSelector from './components/ModeSelector'
 import ConfigPanel from './components/ConfigPanel'
 import StatusPanel from './components/StatusPanel'
@@ -78,6 +79,9 @@ function App() {
 
         {/* Activity Log */}
         <ActivityLog />
+        
+        {/* Footer */}
+        <Footer />
       </div>
     </div>
   )
